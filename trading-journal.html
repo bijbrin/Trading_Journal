@@ -1,0 +1,2003 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MNQ / MES Trading Journal</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            gray: { 750: '#2d3748', 850: '#1f2937', 950: '#0b0f19' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      background-color: #050507;
+      color: #f1f5f9;
+      font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+      letter-spacing: -0.01em;
+    }
+
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: #0f1117;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+
+    .glass {
+      background: rgba(15, 17, 23, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+
+    .card-glow {
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.03), 0 4px 20px -4px rgba(0, 0, 0, 0.5);
+    }
+
+    .stat-glow-green {
+      box-shadow: 0 0 24px -8px rgba(34, 197, 94, 0.25);
+    }
+
+    .stat-glow-red {
+      box-shadow: 0 0 24px -8px rgba(239, 68, 68, 0.25);
+    }
+
+    .stat-glow-blue {
+      box-shadow: 0 0 24px -8px rgba(59, 130, 246, 0.25);
+    }
+
+    .stat-glow-amber {
+      box-shadow: 0 0 24px -8px rgba(245, 158, 11, 0.25);
+    }
+  </style>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+</head>
+
+<body>
+  <div id="root"></div>
+  <script>
+    // ==================== CONSTANTS & HELPERS ====================
+    const { useState, useEffect, useMemo } = React;
+    const e = React.createElement;
+
+    const STORAGE_KEY = 'tradingJournal_v1';
+    const INSTRUMENTS = ['MNQ', 'MES'];
+    const DIRECTIONS = ['Long', 'Short'];
+    const SESSIONS = ['NY open', 'NY lunch', 'Outside session'];
+    const OUTCOMES = ['Win', 'Loss', 'Breakeven', 'Stopped early', 'Target hit'];
+    const PRIMARY_SETUPS = ['Order Block (OB)', 'Fair Value Gap (FVG)', 'Liquidity sweep', 'Breaker Block', 'Market Structure Shift (MSS/BOS)', 'OTE retracement', 'Power of 3 (AMD)', 'ATH Strategy'];
+    const HTF_BIASES = ['Bullish', 'Bearish', 'Neutral/ranging'];
+    const HTF_TIMEFRAMES = ['1H', '4H', 'Daily'];
+    const ENTRY_MODELS = ['OB retest', 'FVG fill', 'Sweep + reverse', 'BOS + pullback', 'OTE zone', 'AMD accumulation'];
+    const EMOTIONAL_STATES = ['Calm', 'Impatient', 'Fearful', 'Overconfident', 'Neutral'];
+    const WAITED_OPTIONS = ['Yes', 'No', 'Partially'];
+    const MOVED_STOP_OPTIONS = ['Yes — widened', 'Yes — tightened', 'No'];
+    const EXITED_EARLY_OPTIONS = ['Yes', 'No'];
+    const EXITED_EARLY_WHY = ['Felt scared', 'Took partials', 'News', 'Other'];
+
+    const ROUTINES_KEY = 'tradingJournalRoutines_v1';
+
+    const CHECKLIST_DEF = [
+      { k: 'htfBiasConfirmed', l: 'HTF bias confirmed (1H or higher)' },
+      { k: 'sessionActive', l: 'Session killzone active (NY open or NY lunch)' },
+      { k: 'validSetup', l: 'Valid ICT setup present (OB, FVG, or sweep)' },
+      { k: 'entry5mConfirmation', l: 'Entry on 1 or 2 Min FVG' },
+      { k: 'stopBeyondStructure', l: 'Stop placed beyond structure (OB low/high or swing)' },
+      { k: 'riskInRange', l: 'Risk is max $200' }
+    ];
+
+    const TICK_SIZE = 0.25;
+
+    function pad2(n) { return String(n).padStart(2, '0'); }
+    function nowLocal() { const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
+    function fmtDate(iso) { if (!iso) return ''; const d = new Date(iso); return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+    function fmt$(n) { return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n); }
+
+    function getSessionFromTime(date = new Date()) {
+      const h = date.getHours(), m = date.getMinutes(), t = h + m / 60;
+      if (t >= 9.5 && t < 11) return 'NY open';
+      if (t >= 13 && t < 15) return 'NY lunch';
+      return 'Outside session';
+    }
+
+    function calcMetrics(t) {
+      const tv = t.instrument === 'MNQ' ? 0.50 : 1.25;
+      
+      let entries = t.entries;
+      if (!entries || !entries.length) {
+        if (t.entryPrice !== '' && t.entryPrice != null) {
+          entries = [{ price: t.entryPrice, contracts: t.contracts || 1 }];
+        } else {
+          entries = [];
+        }
+      }
+      
+      let totalEntryContracts = 0;
+      let sumEntryPriceTimesContracts = 0;
+      entries.forEach(en => {
+        if (en.price !== '' && en.price != null && en.contracts > 0) {
+          const p = parseFloat(en.price);
+          const c = parseFloat(en.contracts);
+          sumEntryPriceTimesContracts += p * c;
+          totalEntryContracts += c;
+        }
+      });
+      const avgEntryPrice = totalEntryContracts > 0 ? (sumEntryPriceTimesContracts / totalEntryContracts) : t.entryPrice;
+
+      const rt = Math.round(Math.abs(avgEntryPrice - t.stopPrice) / TICK_SIZE);
+      const rwt = Math.round(Math.abs(t.targetPrice - avgEntryPrice) / TICK_SIZE);
+      const rr = rt > 0 ? Math.round((rwt / rt) * 100) / 100 : 0;
+
+      let riskContracts = t.contracts || 1;
+      if (totalEntryContracts > 0) riskContracts = totalEntryContracts;
+
+      const risk$ = Math.round(rt * tv * riskContracts * 100) / 100;
+
+      let exits = t.exits;
+      if (!exits || !exits.length) {
+        if (t.exitPrice !== '' && t.exitPrice != null) {
+          exits = [{ price: t.exitPrice, contracts: t.contracts || 1 }];
+        } else {
+          exits = [];
+        }
+      }
+
+      let pnl = 0;
+      let totalExitContracts = 0;
+      let sumExitPriceTimesContracts = 0;
+
+      exits.forEach(ex => {
+        if (ex.price !== '' && ex.price != null && ex.contracts > 0) {
+          const p = parseFloat(ex.price);
+          const c = parseFloat(ex.contracts);
+          let pnlTicks = t.direction === 'Long' ? (p - avgEntryPrice) / TICK_SIZE : (avgEntryPrice - p) / TICK_SIZE;
+          pnl += pnlTicks * tv * c;
+          sumExitPriceTimesContracts += p * c;
+          totalExitContracts += c;
+        }
+      });
+
+      pnl = Math.round(pnl * 100) / 100;
+      const avgExitPrice = totalExitContracts > 0 ? Math.round((sumExitPriceTimesContracts / totalExitContracts) / TICK_SIZE) * TICK_SIZE : t.exitPrice;
+
+      return { rt, rwt, rr, pnl, risk$, avgExitPrice, avgEntryPrice, totalEntryContracts, totalExitContracts, numExits: exits.length };
+    }
+
+    function calcAdherence(t) {
+      if (t.psychology?.setupPlanLevel === 'Gamble') return 0;
+      const entries = Object.entries(t.checklist).filter(([, v]) => v !== 'Skipped');
+      if (!entries.length) return 0;
+      const successCount = entries.filter(([k, v]) => v === 'Yes').length;
+      return Math.round((successCount / entries.length) * 100);
+    }
+
+    function calcRoutineScore(r) {
+      if (!r) return 0;
+      const dCount = ['meditation', 'workout', 'tradeJournal'].filter(k => r.discipline && r.discipline[k]).length;
+      const dp = (dCount / 3) * 100;
+      const pCount = ['meditation5min', 'htfAnalysis', 'markLevels', 'tradePlan', 'newsCheck'].filter(k => r.preMarket && r.preMarket[k]).length;
+      const pp = (pCount + (r.preMarket && r.preMarket.stateOfMind ? 1 : 0) + (r.preMarket && (r.preMarket.preMarketNotes || r.preMarket.journalState) ? 1 : 0)) / 7 * 100;
+      return Math.round((dp + pp) / 2);
+    }
+
+    function emptyChecklist() { const c = {}; CHECKLIST_DEF.forEach(x => c[x.k] = 'No'); return c; }
+
+    function emptyTrade() {
+      const now = nowLocal();
+      return {
+        id: '', date: now, instrument: 'MNQ', direction: 'Long', session: getSessionFromTime(),
+        entries: [{ time: '', price: '', contracts: 1 }],
+        entryPrice: '', stopPrice: '', targetPrice: '', exitPrice: '', contracts: 1,
+        exits: [{ time: '', price: '', contracts: 1 }],
+        outcome: 'Win',
+        setup: { primary: [], htfBias: 'Bullish', htfTimeframe: '1H', entryModel: 'OB retest', confluentLiquidity: false, tookLiquidityBeforeEntry: false },
+        checklist: emptyChecklist(),
+        executionReview: {},
+        psychology: { setupPlanLevel: 'A++', waitedForSetup: 'Yes', movedStop: 'No', exitedEarly: 'No', exitedEarlyWhy: '', whatDidIRight: '', whatDidIWrong: '' },
+        screenshots: { htf: null, ltf: null }
+      };
+    }
+
+    function emptyRoutine() {
+      return {
+        discipline: { meditation: false, workout: false, tradeJournal: false, tradeJournalNotes: '' },
+        preMarket: { meditation5min: false, htfAnalysis: false, markLevels: false, tradePlan: false, newsCheck: false, stateOfMind: '', preMarketNotes: '' },
+        postMarket: { whatDidIRight: '', whatDidIWrong: '' }
+      };
+    }
+
+    function suggestOutcome(t) {
+      const { direction, stopPrice, targetPrice } = t;
+      const m = calcMetrics(t);
+      if (!m || m.numExits === 0) return 'Win';
+      const entryPrice = m.avgEntryPrice;
+      const exitPrice = m.avgExitPrice;
+      if (direction === 'Long') {
+        if (exitPrice >= targetPrice - TICK_SIZE / 2) return 'Target hit';
+        if (exitPrice <= stopPrice + TICK_SIZE / 2) return 'Loss';
+        if (Math.abs(exitPrice - entryPrice) < TICK_SIZE) return 'Breakeven';
+        if (exitPrice > entryPrice) return 'Win';
+        return 'Stopped early';
+      } else {
+        if (exitPrice <= targetPrice + TICK_SIZE / 2) return 'Target hit';
+        if (exitPrice >= stopPrice - TICK_SIZE / 2) return 'Loss';
+        if (Math.abs(exitPrice - entryPrice) < TICK_SIZE) return 'Breakeven';
+        if (exitPrice < entryPrice) return 'Win';
+        return 'Stopped early';
+      }
+    }
+
+    function compressImage(file, callback) {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = event => {
+        const img = new Image();
+        img.src = event.target.result;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const MAX_WIDTH = 1200;
+          const MAX_HEIGHT = 1200;
+          let width = img.width;
+          let height = img.height;
+          if (width > height) {
+            if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; }
+          } else {
+            if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; }
+          }
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+          callback(canvas.toDataURL('image/jpeg', 0.6));
+        };
+      };
+    }
+
+    function ZoomableImageModal({ src, onClose }) {
+      const [scale, setScale] = useState(1);
+      const [isDragging, setIsDragging] = useState(false);
+      const [pos, setPos] = useState({ x: 0, y: 0 });
+      const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+
+      useEffect(() => {
+        const handleWheel = e => {
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            setScale(s => Math.min(Math.max(0.5, s - e.deltaY * 0.01), 5));
+          }
+        };
+        const handleKeyDown = e => {
+          if (e.key === 'Escape') onClose();
+        };
+        window.addEventListener('wheel', handleWheel, { passive: false });
+        window.addEventListener('keydown', handleKeyDown);
+        return () => {
+          window.removeEventListener('wheel', handleWheel);
+          window.removeEventListener('keydown', handleKeyDown);
+        };
+      }, [onClose]);
+
+      const handleMouseDown = e => {
+        setIsDragging(true);
+        setDragStart({ x: e.clientX - pos.x, y: e.clientY - pos.y });
+      };
+      
+      const handleMouseMove = e => {
+        if (!isDragging) return;
+        setPos({ x: e.clientX - dragStart.x, y: e.clientY - dragStart.y });
+      };
+
+      return e('div', { 
+        className: 'fixed inset-0 z-[9999] bg-black/95 flex items-center justify-center overflow-hidden', 
+        onMouseUp: () => setIsDragging(false), 
+        onMouseLeave: () => setIsDragging(false), 
+        onMouseMove: handleMouseMove,
+        onClick: e => e.stopPropagation()
+      },
+        e('button', { onClick: onClose, className: 'absolute top-6 right-6 z-10 p-2.5 bg-white/10 hover:bg-white/20 rounded-full text-white transition backdrop-blur-sm' },
+          e('svg', { xmlns: 'http://www.w3.org/2000/svg', className: 'h-6 w-6', fill: 'none', viewBox: '0 0 24 24', stroke: 'currentColor' }, e('path', { strokeLinecap: 'round', strokeLinejoin: 'round', strokeWidth: 2, d: 'M6 18L18 6M6 6l12 12' }))
+        ),
+        e('div', { className: 'absolute top-6 left-6 z-10 text-white/50 text-xs font-mono bg-black/50 px-3 py-1.5 rounded backdrop-blur-sm' }, 'Hold Ctrl + Scroll to Zoom • Drag to Pan'),
+        e('div', { className: 'flex gap-2 absolute bottom-6 z-10 bg-black/50 p-2 rounded-lg backdrop-blur-sm shadow-xl' },
+          e('button', { onClick: () => setScale(s => Math.max(0.5, s - 0.2)), className: 'p-2 bg-white/10 hover:bg-white/20 rounded text-white text-xs font-bold' }, 'Zoom Out'),
+          e('button', { onClick: () => { setScale(1); setPos({x:0,y:0}); }, className: 'p-2 bg-white/10 hover:bg-white/20 rounded text-white text-xs font-bold' }, 'Reset'),
+          e('button', { onClick: () => setScale(s => Math.min(5, s + 0.2)), className: 'p-2 bg-white/10 hover:bg-white/20 rounded text-white text-xs font-bold' }, 'Zoom In')
+        ),
+        e('img', { 
+          src, 
+          onMouseDown: handleMouseDown,
+          className: 'max-w-none object-contain cursor-move transition-transform duration-75 select-none',
+          style: { transform: `translate(${pos.x}px, ${pos.y}px) scale(${scale})`, maxHeight: '90vh', maxWidth: '90vw' },
+          draggable: false
+        })
+      );
+    }
+
+    // ==================== CHART COMPONENTS ====================
+    function Card({ children, className = '' }) {
+      return e('div', { className: `bg-[#0f1117] rounded-xl border border-white/[0.04] p-5 card-glow ${className}` }, children);
+    }
+
+    function StatCard({ label, value, sub, color }) {
+      const c = color === 'green' ? 'text-emerald-400' : color === 'red' ? 'text-rose-400' : color === 'amber' ? 'text-amber-400' : 'text-blue-400';
+      const glow = color === 'green' ? 'stat-glow-green' : color === 'red' ? 'stat-glow-red' : color === 'amber' ? 'stat-glow-amber' : 'stat-glow-blue';
+      return e('div', { className: `bg-[#0f1117] rounded-xl border border-white/[0.04] p-5 flex flex-col justify-between min-h-[100px] ${glow}` },
+        e('span', { className: 'text-[10px] font-semibold uppercase tracking-[0.08em] text-gray-500 mb-2' }, label),
+        e('span', { className: `text-3xl font-extrabold tracking-tight ${c}` }, value),
+        sub ? e('span', { className: 'text-[11px] text-gray-400 mt-1 font-medium' }, sub) : null
+      );
+    }
+
+    function SimpleBarChart({ data, title, colorFn }) {
+      if (!data || !data.length) return e(Card, null, e('h3', { className: 'text-sm font-semibold text-gray-300 mb-2' }, title), e('p', { className: 'text-xs text-gray-500' }, 'No data yet.'));
+      const max = Math.max(...data.map(d => Math.abs(d.value)), 0.01);
+      const h = 180, bw = 28, gap = 16;
+      const w = Math.max(320, data.length * (bw + gap) + gap);
+      return e(Card, null,
+        e('h3', { className: 'text-sm font-semibold text-gray-300 mb-3' }, title),
+        e('svg', { viewBox: `0 0 ${w} ${h + 40}`, className: 'w-full' },
+          e('line', { x1: 0, y1: h / 2, x2: w, y2: h / 2, stroke: '#334155', strokeWidth: 1 }),
+          data.map((d, i) => {
+            const x = gap + i * (bw + gap);
+            const bh = (Math.abs(d.value) / max) * (h / 2 - 10);
+            const y = d.value >= 0 ? h / 2 - bh : h / 2;
+            const col = colorFn ? colorFn(d.value, d.rawValue !== undefined ? d.rawValue : d.value) : '#3b82f6';
+            return e('g', { key: i },
+              e('rect', { x, y, width: bw, height: bh, fill: col, rx: 2 }),
+              e('text', { x: x + bw / 2, y: d.value >= 0 ? y - 5 : y + bh + 12, textAnchor: 'middle', fill: '#cbd5e1', fontSize: 10 }, String(d.value)),
+              e('text', { x: x + bw / 2, y: h + 18, textAnchor: 'middle', fill: '#94a3b8', fontSize: 10 }, d.label)
+            );
+          })
+        )
+      );
+    }
+
+    function SetupWinRateGrid({ data, title }) {
+      if (!data || !data.length) return e(Card, null, e('h3', { className: 'text-sm font-semibold text-gray-300 mb-2' }, title), e('p', { className: 'text-xs text-gray-500' }, 'No data yet.'));
+      
+      return e(Card, { className: 'flex flex-col' },
+        e('h3', { className: 'text-sm font-semibold text-gray-300 mb-6' }, title),
+        e('div', { className: 'grid grid-cols-2 sm:grid-cols-3 gap-4 max-h-[300px] overflow-y-auto pr-2' },
+          data.map((d, i) => {
+            const pct = d.value;
+            let color = '#3b82f6'; // blue
+            let shadow = 'drop-shadow-[0_0_8px_rgba(59,130,246,0.6)]';
+            if (pct >= 60) {
+              color = '#10b981'; // emerald
+              shadow = 'drop-shadow-[0_0_8px_rgba(16,185,129,0.6)]';
+            } else if (pct < 40) {
+              color = '#f43f5e'; // rose
+              shadow = 'drop-shadow-[0_0_8px_rgba(244,63,94,0.6)]';
+            } else {
+              color = '#f59e0b'; // amber
+              shadow = 'drop-shadow-[0_0_8px_rgba(245,158,11,0.6)]';
+            }
+
+            const radius = 34;
+            const circumference = 2 * Math.PI * radius;
+            const strokeDashoffset = circumference - (pct / 100) * circumference;
+
+            return e('div', { key: i, className: 'flex flex-col items-center p-4 bg-white/[0.02] rounded-xl border border-white/[0.04] hover:bg-white/[0.06] hover:border-white/[0.1] transition group' },
+              e('div', { className: 'relative w-20 h-20 flex items-center justify-center mb-3' },
+                e('svg', { className: 'w-full h-full transform -rotate-90', viewBox: '0 0 100 100' },
+                  e('circle', { cx: 50, cy: 50, r: radius, fill: 'transparent', stroke: '#1f2937', strokeWidth: 8 }),
+                  e('circle', { 
+                    cx: 50, cy: 50, r: radius, fill: 'transparent', stroke: color, strokeWidth: 8, 
+                    strokeDasharray: circumference, strokeDashoffset, strokeLinecap: 'round',
+                    className: `transition-all duration-1000 ease-out ${shadow}`
+                  })
+                ),
+                e('div', { className: 'absolute inset-0 flex items-center justify-center flex-col group-hover:scale-110 transition-transform' },
+                  e('span', { className: 'text-[15px] font-extrabold', style: { color } }, `${pct}%`)
+                )
+              ),
+              e('span', { className: 'text-[10px] font-bold text-gray-400 uppercase tracking-wider text-center line-clamp-2 h-7 leading-tight group-hover:text-gray-200 transition-colors', title: d.label }, d.label)
+            );
+          })
+        )
+      );
+    }
+
+    function TimeProfitabilityChart({ hourlyData, dailyData, setupData }) {
+      const [view, setView] = useState('setup');
+      const data = view === 'hour' ? hourlyData : view === 'day' ? dailyData : setupData;
+
+      if (view === 'setup') {
+        const maxVal = 100;
+        return e(Card, { className: 'flex flex-col h-full' },
+          e('div', { className: 'flex justify-between items-center mb-4' },
+            e('h3', { className: 'text-sm font-semibold text-gray-300' }, 'Win Rate by Setup'),
+            e('div', { className: 'flex bg-black/40 rounded-lg p-1 border border-white/[0.04]' },
+              e('button', { onClick: () => setView('setup'), className: `px-4 py-1.5 rounded-md text-xs font-bold transition-all ${view === 'setup' ? 'bg-blue-600 text-white' : 'text-gray-500 hover:text-gray-300'}` }, 'By Setup'),
+              e('button', { onClick: () => setView('hour'), className: `px-4 py-1.5 rounded-md text-xs font-bold transition-all ${view === 'hour' ? 'bg-blue-600 text-white' : 'text-gray-500 hover:text-gray-300'}` }, 'By Hour'),
+              e('button', { onClick: () => setView('day'), className: `px-4 py-1.5 rounded-md text-xs font-bold transition-all ${view === 'day' ? 'bg-blue-600 text-white' : 'text-gray-500 hover:text-gray-300'}` }, 'By Day')
+            )
+          ),
+          e('div', { className: 'flex-1 flex items-end justify-between gap-2 h-48 pb-8 relative' },
+            e('div', { className: 'absolute inset-x-0 bottom-8 border-b border-white/[0.04]' }),
+            !data.length ? e('div', { className: 'w-full text-center text-xs text-gray-500 py-10' }, 'No data yet.') :
+            data.map((d, i) => {
+              const hPct = Math.max((d.value / maxVal) * 100, 2);
+              const isPos = d.value >= 50;
+              const color = d.value >= 60 ? 'from-emerald-500 to-teal-400' : d.value >= 40 ? 'from-amber-500 to-yellow-400' : 'from-rose-500 to-red-400';
+              const textCol = d.value >= 60 ? 'text-emerald-400' : d.value >= 40 ? 'text-amber-400' : 'text-rose-400';
+              return e('div', { key: i, className: 'flex flex-col items-center justify-end h-full w-full group relative z-10', title: `${d.label}: ${d.value}%` },
+                e('span', { className: `absolute -top-7 text-[10px] font-bold opacity-80 group-hover:opacity-100 ${textCol}` }, `${d.value}%`),
+                e('div', { className: `w-full max-w-[3rem] bg-gradient-to-t ${color} rounded-t-sm transition-all`, style: { height: `${hPct}%` } }),
+                e('div', { className: 'absolute -bottom-7 text-[9px] font-bold text-gray-500 uppercase tracking-widest whitespace-nowrap max-w-[4rem] overflow-hidden text-ellipsis', title: d.label }, d.label)
+              );
+            })
+          )
+        );
+      }
+
+      // Bar Graph for Hourly and Daily profitability
+      const maxVal = Math.max(...data.map(d => Math.abs(d.value)), 100);
+      const roundedMax = Math.ceil(maxVal / 100) * 100;
+      const h = 180, padding = { top: 20, right: 20, bottom: 40, left: 50 };
+      const chartW = Math.max(300, data.length * 50);
+      const innerW = chartW - padding.left - padding.right;
+      const innerH = h - padding.top - padding.bottom;
+      const barW = Math.min(40, (innerW / data.length) - 8);
+      const gap = (innerW - barW * data.length) / (data.length + 1);
+
+      const toY = v => padding.top + (roundedMax - v) / (roundedMax * 2) * innerH + innerH / 2;
+      const zeroY = toY(0);
+
+      const yTicks = [];
+      for (let v = 0; v <= roundedMax; v += 100) {
+        yTicks.push(v);
+      }
+
+      const colorFn = (d) => d.value >= 0 ? '#10b981' : '#f43f5e';
+
+      return e(Card, { className: 'flex flex-col' },
+        e('div', { className: 'flex justify-between items-center mb-4' },
+          e('h3', { className: 'text-sm font-semibold text-gray-300' }, 'Time-Based Profitability'),
+          e('div', { className: 'flex bg-black/40 rounded-lg p-1 border border-white/[0.04]' },
+            e('button', { onClick: () => setView('setup'), className: `px-4 py-1.5 rounded-md text-xs font-bold transition-all ${view === 'setup' ? 'bg-blue-600 text-white' : 'text-gray-500 hover:text-gray-300'}` }, 'By Setup'),
+            e('button', { onClick: () => setView('hour'), className: `px-4 py-1.5 rounded-md text-xs font-bold transition-all ${view === 'hour' ? 'bg-blue-600 text-white' : 'text-gray-500 hover:text-gray-300'}` }, 'By Hour'),
+            e('button', { onClick: () => setView('day'), className: `px-4 py-1.5 rounded-md text-xs font-bold transition-all ${view === 'day' ? 'bg-blue-600 text-white' : 'text-gray-500 hover:text-gray-300'}` }, 'By Day')
+          )
+        ),
+        e('div', { className: 'overflow-x-auto' },
+          !data.length ? e('div', { className: 'text-center text-xs text-gray-500 py-10' }, 'No data yet.') :
+          e('svg', { viewBox: `0 0 ${chartW} ${h}`, className: 'w-full min-w-[300px]', style: { height: h } },
+            // Grid lines
+            yTicks.map(v => e('g', { key: `y-${v}` },
+              e('line', { x1: padding.left, y1: toY(v), x2: chartW - padding.right, y2: toY(v), stroke: '#1f2937', strokeWidth: 1, strokeDasharray: v === 0 ? '0' : '4,4' }),
+              e('text', { x: padding.left - 8, y: toY(v) + 4, textAnchor: 'end', fill: '#64748b', fontSize: 10 }, v === 0 ? '$0' : `$${v}`)
+            )),
+            // Bars
+            data.map((d, i) => {
+              const x = padding.left + gap + i * (barW + gap);
+              const isPos = d.value >= 0;
+              const barH = Math.abs(d.value) / roundedMax * (innerH / 2);
+              const y = isPos ? zeroY - barH : zeroY;
+              const color = isPos ? '#10b981' : '#f43f5e';
+              return e('g', { key: i },
+                e('rect', { x, y, width: barW, height: barH, fill: color, rx: 3, className: 'hover:brightness-125 cursor-pointer transition-all' }),
+                e('text', { x: x + barW / 2, y: isPos ? y - 6 : y + barH + 14, textAnchor: 'middle', fill: color, fontSize: 10, fontWeight: 'bold' }, fmt$(d.value)),
+                e('text', { x: x + barW / 2, y: h - 10, textAnchor: 'middle', fill: '#64748b', fontSize: 10 }, d.label)
+              );
+            })
+          )
+        )
+      );
+    }
+
+    function ExpectancyStats({ trades }) {
+      const stats = useMemo(() => {
+        if (!trades || !trades.length) return null;
+        let wins = [], losses = [];
+        trades.forEach(t => {
+          const m = calcMetrics(t);
+          if (m.pnl > 0) wins.push(m.pnl);
+          else if (m.pnl < 0) losses.push(Math.abs(m.pnl));
+        });
+        if (!wins.length && !losses.length) return null;
+        const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0;
+        const avgLoss = losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : 0;
+        const expectancy = (wins.length * avgWin - losses.length * avgLoss) / (wins.length + losses.length);
+        const winRate = wins.length / (wins.length + losses.length);
+        return {
+          avgWin: Math.round(avgWin * 100) / 100,
+          avgLoss: Math.round(avgLoss * 100) / 100,
+          expectancy: Math.round(expectancy * 100) / 100,
+          avgWinLoss: wins.length && losses.length ? `${(avgWin / avgLoss).toFixed(2)}:1` : 'N/A',
+          totalWins: wins.length,
+          totalLosses: losses.length,
+          winRate: Math.round(winRate * 100)
+        };
+      }, [trades]);
+
+      if (!stats) return e(Card, null,
+        e('h3', { className: 'text-sm font-semibold text-gray-300 mb-2' }, 'Expectancy'),
+        e('p', { className: 'text-xs text-gray-500' }, 'Need wins and losses to calculate.')
+      );
+
+      return e(Card, { className: 'flex flex-col' },
+        e('h3', { className: 'text-sm font-semibold text-gray-300 mb-4' }, 'Expectancy'),
+        e('div', { className: 'grid grid-cols-2 gap-3' },
+          e('div', { className: 'flex flex-col gap-1 p-3 rounded-lg bg-emerald-500/5 border border-emerald-500/20' },
+            e('span', { className: 'text-[10px] text-gray-500 uppercase tracking-wider' }, 'Avg Win'),
+            e('span', { className: 'text-lg font-bold text-emerald-400' }, fmt$(stats.avgWin))
+          ),
+          e('div', { className: 'flex flex-col gap-1 p-3 rounded-lg bg-rose-500/5 border border-rose-500/20' },
+            e('span', { className: 'text-[10px] text-gray-500 uppercase tracking-wider' }, 'Avg Loss'),
+            e('span', { className: 'text-lg font-bold text-rose-400' }, fmt$(stats.avgLoss))
+          ),
+          e('div', { className: 'flex flex-col gap-1 p-3 rounded-lg bg-blue-500/5 border border-blue-500/20' },
+            e('span', { className: 'text-[10px] text-gray-500 uppercase tracking-wider' }, 'Expectancy'),
+            e('span', { className: `text-lg font-bold ${stats.expectancy >= 0 ? 'text-blue-400' : 'text-rose-400'}` }, fmt$(stats.expectancy))
+          ),
+          e('div', { className: 'flex flex-col gap-1 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20' },
+            e('span', { className: 'text-[10px] text-gray-500 uppercase tracking-wider' }, 'Avg W:L'),
+            e('span', { className: 'text-lg font-bold text-amber-400' }, stats.avgWinLoss)
+          )
+        ),
+        e('div', { className: 'flex justify-between mt-4 pt-3 border-t border-white/5 text-[10px] text-gray-500' },
+          e('span', null, `${stats.totalWins}W / ${stats.totalLosses}L`)
+        )
+      );
+    }
+
+    function BestWorstDays({ pnlByDay }) {
+      if (!pnlByDay || !pnlByDay.length) return e(Card, null,
+        e('h3', { className: 'text-sm font-semibold text-gray-300 mb-2' }, 'Best & Worst Days'),
+        e('p', { className: 'text-xs text-gray-500' }, 'No data yet.')
+      );
+
+      const sorted = [...pnlByDay].sort((a, b) => b.pnl - a.pnl);
+      const best = sorted[0];
+      const worst = sorted[sorted.length - 1];
+
+      return e(Card, { className: 'flex flex-col' },
+        e('h3', { className: 'text-sm font-semibold text-gray-300 mb-4' }, 'Best & Worst Days'),
+        e('div', { className: 'flex flex-col gap-3' },
+          e('div', { className: 'flex items-center justify-between p-3 rounded-lg bg-emerald-500/5 border border-emerald-500/20' },
+            e('div', null,
+              e('span', { className: 'text-[10px] text-emerald-400 uppercase tracking-wider font-bold' }, 'Best Day'),
+              e('span', { className: 'block text-xs text-gray-400 mt-1' }, best.date)
+            ),
+            e('span', { className: 'text-lg font-bold text-emerald-400' }, fmt$(best.pnl))
+          ),
+          e('div', { className: 'flex items-center justify-between p-3 rounded-lg bg-rose-500/5 border border-rose-500/20' },
+            e('div', null,
+              e('span', { className: 'text-[10px] text-rose-400 uppercase tracking-wider font-bold' }, 'Worst Day'),
+              e('span', { className: 'block text-xs text-gray-400 mt-1' }, worst.date)
+            ),
+            e('span', { className: 'text-lg font-bold text-rose-400' }, fmt$(worst.pnl))
+          )
+        )
+      );
+    }
+
+    function EmotionTable({ data }) {
+      const outcomes = ['Win', 'Target hit', 'Breakeven', 'Stopped early', 'Loss'];
+      const colors = { 'Win': 'text-green-400', 'Target hit': 'text-green-300', 'Breakeven': 'text-amber-400', 'Stopped early': 'text-amber-300', 'Loss': 'text-red-400' };
+      return e(Card, { className: 'overflow-hidden p-0' },
+        e('h3', { className: 'text-sm font-semibold text-gray-300 p-4 border-b border-gray-700' }, 'Emotional State vs Outcome'),
+        e('div', { className: 'overflow-x-auto' },
+          e('table', { className: 'w-full text-sm' },
+            e('thead', null, e('tr', { className: 'bg-gray-900 text-gray-400' },
+              e('th', { className: 'text-left px-4 py-2 font-medium' }, 'Emotion'),
+              ...outcomes.map(o => e('th', { key: o, className: 'text-center px-3 py-2 font-medium' }, o))
+            )),
+            e('tbody', null,
+              data.map((row, i) => e('tr', { key: i, className: 'border-t border-gray-700 hover:bg-gray-750' },
+                e('td', { className: 'px-4 py-2 font-medium text-gray-300' }, row.emotion),
+                ...outcomes.map(o => e('td', { key: o, className: `text-center px-3 py-2 ${colors[o]}` }, row[o] || 0))
+              ))
+            )
+          )
+        )
+      );
+    }
+
+    // ==================== FORM COMPONENTS ====================
+    function FormSection({ title, children }) {
+      return e('div', { className: 'bg-[#0a0b10] rounded-xl border border-white/[0.04] overflow-hidden mb-5 card-glow' },
+        e('div', { className: 'bg-white/[0.02] px-5 py-3 border-b border-white/[0.04] flex items-center justify-between' },
+          e('h2', { className: 'text-[11px] font-bold text-gray-300 uppercase tracking-[0.1em]' }, title)
+        ),
+        e('div', { className: 'p-5 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5' }, children)
+      );
+    }
+
+    function Field({ label, children, wide = false }) {
+      return e('div', { className: wide ? 'md:col-span-2 lg:col-span-3' : '' },
+        e('label', { className: 'block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5' }, label),
+        children
+      );
+    }
+
+    function S({ value, onChange, opts }) {
+      return e('select', { value, onChange: ev => onChange(ev.target.value), className: 'w-full bg-[#0a0b10] border border-white/[0.06] rounded-lg px-3 py-2.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/20 transition' },
+        opts.map(o => e('option', { key: o, value: o }, o))
+      );
+    }
+
+    function N({ value, onChange, step = '0.25', placeholder = '' }) {
+      return e('input', {
+        type: 'number', step, value: value === 0 || value ? value : '', placeholder, onChange: ev => {
+          const v = ev.target.value;
+          onChange(v === '' ? '' : parseFloat(v));
+        }, className: 'w-full bg-[#0a0b10] border border-white/[0.06] rounded-lg px-3 py-2.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/20 transition'
+      });
+    }
+
+    function T({ value, onChange, placeholder = '', rows = 3 }) {
+      return e('textarea', { value, placeholder, rows, onChange: ev => onChange(ev.target.value), className: 'w-full bg-[#0a0b10] border border-white/[0.06] rounded-lg px-3 py-2.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/20 transition resize-none' });
+    }
+
+    function Toggle3({ value, onChange }) {
+      return e('div', { className: 'flex rounded-lg overflow-hidden border border-white/[0.06]' },
+        ['Yes', 'No', 'Skipped'].map(opt => e('button', {
+          key: opt, type: 'button', onClick: () => onChange(opt),
+          className: `flex-1 py-2 text-xs font-semibold tracking-wide transition ${value === opt ? (opt === 'Yes' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : opt === 'No' ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' : 'bg-amber-500/20 text-amber-300 border-amber-500/40') : 'bg-[#0a0b10] text-gray-500 hover:text-gray-300 hover:bg-white/[0.02]'}`
+        }, opt))
+      );
+    }
+
+    function ToggleBool({ value, onChange }) {
+      return e('div', { className: 'flex rounded-lg overflow-hidden border border-white/[0.06]' },
+        [true, false].map((opt, i) => e('button', {
+          key: String(opt), type: 'button', onClick: () => onChange(opt),
+          className: `flex-1 py-2 text-xs font-semibold tracking-wide transition ${value === opt ? (opt ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : 'bg-rose-500/20 text-rose-300 border-rose-500/40') : 'bg-[#0a0b10] text-gray-500 hover:text-gray-300 hover:bg-white/[0.02]'}`
+        }, i === 0 ? 'Yes' : 'No'))
+      );
+    }
+
+    function MultiTag({ opts, selected, onChange }) {
+      return e('div', { className: 'flex flex-wrap gap-2' },
+        opts.map(opt => {
+          const sel = selected.includes(opt);
+          return e('button', {
+            key: opt, type: 'button', onClick: () => {
+              if (sel) onChange(selected.filter(s => s !== opt));
+              else onChange([...selected, opt]);
+            }, className: `px-3 py-1.5 rounded-full text-xs border transition ${sel ? 'bg-blue-500/15 border-blue-400/40 text-blue-300' : 'bg-[#0a0b10] border-white/[0.06] text-gray-400 hover:border-white/[0.12] hover:text-gray-300'}`
+          }, opt);
+        })
+      );
+    }
+
+    function Rating({ value, onChange, min = 1, max = 5 }) {
+      return e('div', { className: 'flex items-center gap-3' },
+        e('input', { type: 'range', min, max, value, onChange: ev => onChange(parseInt(ev.target.value)), className: 'flex-1 h-2 bg-white/[0.06] rounded-lg appearance-none cursor-pointer accent-blue-500' }),
+        e('span', { className: 'text-sm font-bold text-blue-400 w-6 text-center' }, value)
+      );
+    }
+
+    function ImageUpload({ label, value, onChange }) {
+      const [preview, setPreview] = useState(false);
+      return e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5' }, label),
+        e('div', { className: 'flex items-center gap-4' },
+          value ? e('img', {
+            src: value, className: 'h-16 w-24 object-cover rounded-md border border-gray-600 cursor-pointer', onClick: () => setPreview(true)
+          }) : null,
+          e('div', { className: 'flex-1' },
+            e('input', {
+              type: 'file', accept: 'image/*',
+              onChange: ev => {
+                const file = ev.target.files[0];
+                if (file) compressImage(file, compressed => onChange(compressed));
+                ev.target.value = '';
+              },
+              className: 'w-full text-xs text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-blue-500/10 file:text-blue-400 hover:file:bg-blue-500/20 transition cursor-pointer'
+            })
+          ),
+          value ? e('button', {
+            type: 'button', onClick: () => onChange(null),
+            className: 'text-xs text-red-400 hover:text-red-300 px-3 py-2 bg-red-400/10 hover:bg-red-400/20 rounded transition'
+          }, 'Remove') : null
+        ),
+        preview ? e(ZoomableImageModal, { src: value, onClose: () => setPreview(false) }) : null
+      );
+    }
+
+    function ImageModal({ htf, ltf, onClose }) {
+      const [activeTab, setActiveTab] = useState('HTF');
+      return e('div', { className: 'fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4' },
+        e('div', { className: 'bg-[#0f1117] border border-white/[0.06] rounded-xl w-full max-w-5xl max-h-[90vh] flex flex-col shadow-2xl' },
+          e('div', { className: 'flex items-center justify-between p-4 border-b border-white/[0.04]' },
+            e('div', { className: 'flex gap-2' },
+              e('button', { onClick: () => setActiveTab('HTF'), className: `px-4 py-1.5 rounded-md text-sm font-semibold transition ${activeTab === 'HTF' ? 'bg-blue-600 text-white' : 'bg-white/[0.04] text-gray-400 hover:text-gray-200'}` }, 'HTF Screenshot'),
+              e('button', { onClick: () => setActiveTab('LTF'), className: `px-4 py-1.5 rounded-md text-sm font-semibold transition ${activeTab === 'LTF' ? 'bg-blue-600 text-white' : 'bg-white/[0.04] text-gray-400 hover:text-gray-200'}` }, 'LTF Screenshot')
+            ),
+            e('button', { onClick: onClose, className: 'text-gray-400 hover:text-white transition' },
+              e('svg', { xmlns: 'http://www.w3.org/2000/svg', className: 'h-6 w-6', fill: 'none', viewBox: '0 0 24 24', stroke: 'currentColor' },
+                e('path', { strokeLinecap: 'round', strokeLinejoin: 'round', strokeWidth: 2, d: 'M6 18L18 6M6 6l12 12' })
+              )
+            )
+          ),
+          e('div', { className: 'flex-1 overflow-auto p-4 flex justify-center items-start' },
+            activeTab === 'HTF'
+              ? (htf ? e('img', { src: htf, className: 'max-w-full rounded border border-white/[0.06]' }) : e('p', { className: 'text-gray-500 my-10' }, 'No HTF screenshot attached.'))
+              : (ltf ? e('img', { src: ltf, className: 'max-w-full rounded border border-white/[0.06]' }) : e('p', { className: 'text-gray-500 my-10' }, 'No LTF screenshot attached.'))
+          )
+        )
+      );
+    }
+
+    // ==================== VIEWS ====================
+
+    function MonthlyCalendar({ pnlByDay, onDateClick, discipline }) {
+      const [currentDate, setCurrentDate] = useState(() => {
+        const d = new Date();
+        return new Date(d.getFullYear(), d.getMonth(), 1);
+      });
+      const [showPercent, setShowPercent] = useState(false);
+
+      const year = currentDate.getFullYear();
+      const month = currentDate.getMonth();
+      const monthPrefix = `${year}-${pad2(month + 1)}`;
+
+      const handlePrev = () => setCurrentDate(new Date(year, month - 1, 1));
+      const handleNext = () => setCurrentDate(new Date(year, month + 1, 1));
+      const handleToday = () => {
+        const d = new Date();
+        setCurrentDate(new Date(d.getFullYear(), d.getMonth(), 1));
+      };
+
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      const firstDayOfWeek = new Date(year, month, 1).getDay();
+
+      const blanks = Array.from({ length: firstDayOfWeek }).map((_, i) => null);
+      const days = Array.from({ length: daysInMonth }).map((_, i) => i + 1);
+      const totalCells = [...blanks, ...days];
+      while (totalCells.length < 42) totalCells.push(null);
+
+      const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+      const pnlMap = {};
+      pnlByDay.forEach(d => pnlMap[d.date] = d.pnl);
+
+      const todayStr = `${new Date().getFullYear()}-${pad2(new Date().getMonth() + 1)}-${pad2(new Date().getDate())}`;
+
+      // Calculate monthly stats
+      const monthData = pnlByDay.filter(d => d.date.startsWith(monthPrefix));
+      const totalPnL = monthData.reduce((s, d) => s + d.pnl, 0);
+      const winDays = monthData.filter(d => d.pnl > 0).length;
+      const lossDays = monthData.filter(d => d.pnl < 0).length;
+      const breakEvenDays = monthData.filter(d => d.pnl === 0).length;
+      const totalDays = monthData.length;
+      const winRate = totalDays > 0 ? Math.round((winDays / totalDays) * 100) : 0;
+
+      // Summary Section
+      const pnlColorClass = totalPnL > 0 ? 'text-emerald-400' : totalPnL < 0 ? 'text-rose-400' : 'text-gray-400';
+      const winRateColorClass = winRate >= 50 ? 'text-emerald-400' : winRate < 40 ? 'text-rose-400' : 'text-amber-400';
+
+      // For % mode display - show meaningful percentages
+      const winRateFormatted = showPercent ? `${winRate}% WR` : null;
+      const disciplineVal = discipline || 0;
+      const disciplineColorClass = disciplineVal >= 80 ? 'text-emerald-400' : disciplineVal >= 60 ? 'text-amber-400' : 'text-rose-400';
+
+      if (showPercent && totalDays > 0) {
+        // % mode - compact summary with Win Rate and Discipline
+        return e(Card, { className: 'flex flex-col' },
+          e('div', { className: 'flex items-center justify-between mb-4' },
+            e('h3', { className: 'text-base font-extrabold text-gray-200 tracking-wide' }, `${monthNames[month]} ${year}`),
+            e('div', { className: 'flex items-center gap-1' },
+              e('div', { className: 'flex items-center bg-black/40 rounded-lg border border-white/[0.04] p-0.5 mr-2' },
+                e('button', { onClick: () => setShowPercent(false), className: `px-2 py-1 rounded text-[10px] font-bold transition ${!showPercent ? 'bg-blue-600 text-white' : 'text-gray-500'}` }, '$'),
+                e('button', { onClick: () => setShowPercent(true), className: `px-2 py-1 rounded text-[10px] font-bold transition ${showPercent ? 'bg-blue-600 text-white' : 'text-gray-500'}` }, '%')
+              ),
+              e('div', { className: 'flex items-center gap-1 bg-white/[0.02] border border-white/[0.04] rounded-lg p-1' },
+                e('button', { onClick: handlePrev, className: 'p-1 rounded hover:bg-white/[0.05] text-gray-400 hover:text-white transition' }, '◀'),
+                e('button', { onClick: handleToday, className: 'px-2 py-1 rounded hover:bg-white/[0.05] text-[9px] uppercase font-bold text-gray-400 hover:text-white transition' }, 'Today'),
+                e('button', { onClick: handleNext, className: 'p-1 rounded hover:bg-white/[0.05] text-gray-400 hover:text-white transition' }, '▶')
+              )
+            )
+          ),
+          e('div', { className: 'grid grid-cols-2 gap-3 mb-4' },
+            e('div', { className: 'text-center p-4 bg-emerald-500/5 border border-emerald-500/20 rounded-lg' },
+              e('div', { className: 'text-[9px] uppercase text-emerald-400/70 tracking-wider mb-2' }, 'Win Rate'),
+              e('div', { className: `text-3xl font-extrabold ${winRateColorClass}` }, `${winRate}%`)
+            ),
+            e('div', { className: 'text-center p-4 bg-blue-500/5 border border-blue-500/20 rounded-lg' },
+              e('div', { className: 'text-[9px] uppercase text-blue-400/70 tracking-wider mb-2' }, 'Discipline'),
+              e('div', { className: `text-3xl font-extrabold ${disciplineColorClass}` }, `${disciplineVal}%`)
+            )
+          ),
+          e('div', { className: 'flex justify-center gap-6 text-xs text-gray-500' },
+            e('span', null, e('span', { className: 'text-emerald-400 font-bold' }, `${winDays}W`), ` / `, e('span', { className: 'text-rose-400 font-bold' }, `${lossDays}L`), `${breakEvenDays > 0 ? ` / ${breakEvenDays}BE` : ''}`),
+            e('span', null, `${totalDays} days`)
+          ),
+          e('div', { className: 'grid grid-cols-7 gap-1.5 mb-2' },
+            ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => e('div', { key: d, className: 'text-center text-[10px] font-bold text-gray-500 uppercase tracking-wider py-1' }, d))
+          ),
+          e('div', { className: 'grid grid-cols-7 gap-1.5 flex-1' },
+            totalCells.map((day, i) => {
+              if (!day) return e('div', { key: `blank-${i}`, className: 'min-h-[70px] rounded-lg bg-white/[0.01] border border-white/[0.02]' });
+              const dateStr = `${year}-${pad2(month + 1)}-${pad2(day)}`;
+              const pnl = pnlMap[dateStr];
+              const hasTrade = pnl !== undefined;
+
+              let pnlColor = 'text-gray-500';
+              let bgClass = 'bg-white/[0.02] hover:bg-white/[0.04] border-white/[0.04]';
+              if (hasTrade) {
+                if (pnl > 0) {
+                  pnlColor = 'text-emerald-400';
+                  bgClass = 'bg-emerald-500/[0.05] border-emerald-500/30 hover:bg-emerald-500/[0.1]';
+                } else if (pnl < 0) {
+                  pnlColor = 'text-rose-400';
+                  bgClass = 'bg-rose-500/[0.05] border-rose-500/30 hover:bg-rose-500/[0.1]';
+                } else {
+                  pnlColor = 'text-gray-300';
+                  bgClass = 'bg-gray-500/[0.05] border-gray-500/30 hover:bg-gray-500/[0.1]';
+                }
+              }
+
+              const isToday = dateStr === todayStr;
+
+              return e('div', { key: day, title: dateStr, onClick: () => { if(hasTrade && onDateClick) onDateClick(dateStr); }, className: `min-h-[70px] p-2 flex flex-col justify-between rounded-lg border transition ${hasTrade ? 'cursor-pointer hover:ring-2 hover:ring-white/20' : 'cursor-default'} ${bgClass} ${isToday ? 'ring-1 ring-blue-500/50 bg-blue-500/[0.02]' : ''}` },
+                e('div', { className: `text-[11px] font-bold ${isToday ? 'text-blue-400' : 'text-gray-500'}` }, day),
+                hasTrade ? e('div', { className: `text-[11px] font-mono font-extrabold self-end tracking-tight ${pnlColor}` }, pnl > 0 ? 'WIN' : 'LOSS') : null
+              );
+            })
+          )
+        );
+      }
+
+      // $ mode - original display
+      return e(Card, { className: 'flex flex-col' },
+        e('div', { className: 'flex items-center justify-between mb-4' },
+          e('h3', { className: 'text-base font-extrabold text-gray-200 tracking-wide' }, `${monthNames[month]} ${year}`),
+          e('div', { className: 'flex items-center gap-1' },
+            e('div', { className: 'flex items-center bg-black/40 rounded-lg border border-white/[0.04] p-0.5 mr-2' },
+              e('button', { onClick: () => setShowPercent(false), className: `px-2 py-1 rounded text-[10px] font-bold transition ${!showPercent ? 'bg-blue-600 text-white' : 'text-gray-500'}` }, '$'),
+              e('button', { onClick: () => setShowPercent(true), className: `px-2 py-1 rounded text-[10px] font-bold transition ${showPercent ? 'bg-blue-600 text-white' : 'text-gray-500'}` }, '%')
+            ),
+            e('div', { className: 'flex items-center gap-1 bg-white/[0.02] border border-white/[0.04] rounded-lg p-1' },
+              e('button', { onClick: handlePrev, className: 'p-1 rounded hover:bg-white/[0.05] text-gray-400 hover:text-white transition' }, '◀'),
+              e('button', { onClick: handleToday, className: 'px-2 py-1 rounded hover:bg-white/[0.05] text-[9px] uppercase font-bold text-gray-400 hover:text-white transition' }, 'Today'),
+              e('button', { onClick: handleNext, className: 'p-1 rounded hover:bg-white/[0.05] text-gray-400 hover:text-white transition' }, '▶')
+            )
+          )
+        ),
+        e('div', { className: 'grid grid-cols-4 gap-2 mb-4 p-3 bg-white/[0.02] rounded-lg border border-white/[0.04]' },
+          e('div', { className: 'text-center' },
+            e('div', { className: 'text-[9px] uppercase text-gray-500 tracking-wider mb-1' }, 'P&L'),
+            e('div', { className: `text-sm font-bold ${pnlColorClass}` }, fmt$(totalPnL))
+          ),
+          e('div', { className: 'text-center' },
+            e('div', { className: 'text-[9px] uppercase text-gray-500 tracking-wider mb-1' }, 'Win Rate'),
+            e('div', { className: `text-sm font-bold ${winRateColorClass}` }, `${winRate}%`)
+          ),
+          e('div', { className: 'text-center' },
+            e('div', { className: 'text-[9px] uppercase text-gray-500 tracking-wider mb-1' }, 'Days Traded'),
+            e('div', { className: 'text-sm font-bold text-gray-300' }, totalDays)
+          ),
+          e('div', { className: 'text-center' },
+            e('div', { className: 'text-[9px] uppercase text-gray-500 tracking-wider mb-1' }, 'W/L Days'),
+            e('div', { className: 'text-sm font-bold' },
+              e('span', { className: 'text-emerald-400' }, winDays), e('span', { className: 'text-gray-500' }, '/'), e('span', { className: 'text-rose-400' }, lossDays),
+              breakEvenDays > 0 && [e('span', { key: 'be', className: 'text-gray-500' }, `/${breakEvenDays}BE`)]
+            )
+          )
+        ),
+        e('div', { className: 'grid grid-cols-7 gap-1.5 mb-2' },
+          ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => e('div', { key: d, className: 'text-center text-[10px] font-bold text-gray-500 uppercase tracking-wider py-1' }, d))
+        ),
+        e('div', { className: 'grid grid-cols-7 gap-1.5 flex-1' },
+          totalCells.map((day, i) => {
+            if (!day) return e('div', { key: `blank-${i}`, className: 'min-h-[70px] rounded-lg bg-white/[0.01] border border-white/[0.02]' });
+            const dateStr = `${year}-${pad2(month + 1)}-${pad2(day)}`;
+            const pnl = pnlMap[dateStr];
+            const hasTrade = pnl !== undefined;
+
+            let pnlColor = 'text-gray-500';
+            let bgClass = 'bg-white/[0.02] hover:bg-white/[0.04] border-white/[0.04]';
+            if (hasTrade) {
+              if (pnl > 0) {
+                pnlColor = 'text-emerald-400';
+                bgClass = 'bg-emerald-500/[0.05] border-emerald-500/30 hover:bg-emerald-500/[0.1]';
+              } else if (pnl < 0) {
+                pnlColor = 'text-rose-400';
+                bgClass = 'bg-rose-500/[0.05] border-rose-500/30 hover:bg-rose-500/[0.1]';
+              } else {
+                pnlColor = 'text-gray-300';
+                bgClass = 'bg-gray-500/[0.05] border-gray-500/30 hover:bg-gray-500/[0.1]';
+              }
+            }
+
+            const isToday = dateStr === todayStr;
+
+            return e('div', { key: day, title: dateStr, onClick: () => { if(hasTrade && onDateClick) onDateClick(dateStr); }, className: `min-h-[70px] p-2 flex flex-col justify-between rounded-lg border transition ${hasTrade ? 'cursor-pointer hover:ring-2 hover:ring-white/20' : 'cursor-default'} ${bgClass} ${isToday ? 'ring-1 ring-blue-500/50 bg-blue-500/[0.02]' : ''}` },
+              e('div', { className: `text-[11px] font-bold ${isToday ? 'text-blue-400' : 'text-gray-500'}` }, day),
+              hasTrade ? e('div', { className: `text-[11px] font-mono font-extrabold self-end tracking-tight ${pnlColor}` }, fmt$(pnl)) : null
+            );
+          })
+        )
+      );
+
+    }
+    function DirectionPieChart({ longs, shorts, title }) {
+      const total = longs.trades + shorts.trades;
+      if (total === 0) return e(Card, null, e('h3', { className: 'text-sm font-semibold text-gray-300 mb-2' }, title), e('p', { className: 'text-xs text-gray-500' }, 'No data yet.'));
+
+      const longPct = longs.trades / total;
+      const shortPct = shorts.trades / total;
+
+      const size = 140;
+      const cx = size / 2;
+      const cy = size / 2;
+      const radius = 50;
+      const strokeWidth = 16;
+      const circumference = 2 * Math.PI * radius;
+
+      const gap = (longs.trades > 0 && shorts.trades > 0) ? 4 : 0;
+      const longDash = (longPct * circumference) - gap;
+      const shortDash = (shortPct * circumference) - gap;
+
+      const colorLong = '#3b82f6';
+      const colorShort = '#f59e0b';
+
+      return e(Card, { className: 'flex flex-col' },
+        e('h3', { className: 'text-sm font-semibold text-gray-300 mb-6' }, title),
+        e('div', { className: 'flex-1 flex items-center justify-between gap-6' },
+          e('div', { className: 'relative w-32 h-32 flex-shrink-0' },
+            e('svg', { viewBox: `0 0 ${size} ${size}`, className: 'w-full h-full transform -rotate-90' },
+              e('circle', { cx, cy, r: radius, fill: 'none', stroke: '#1f2937', strokeWidth }),
+              longs.trades > 0 && e('circle', { cx, cy, r: radius, fill: 'none', stroke: colorLong, strokeWidth, strokeDasharray: `${Math.max(0, longDash)} ${circumference}`, strokeDashoffset: 0, strokeLinecap: 'round' }),
+              shorts.trades > 0 && e('circle', { cx, cy, r: radius, fill: 'none', stroke: colorShort, strokeWidth, strokeDasharray: `${Math.max(0, shortDash)} ${circumference}`, strokeDashoffset: -(longPct * circumference), strokeLinecap: 'round' })
+            ),
+            e('div', { className: 'absolute inset-0 flex flex-col items-center justify-center text-center' },
+              e('span', { className: 'text-2xl font-bold text-gray-200' }, total),
+              e('span', { className: 'text-[9px] uppercase tracking-wider text-gray-500 font-semibold mt-0.5' }, 'Trades')
+            )
+          ),
+          e('div', { className: 'flex-1 space-y-4' },
+            e('div', { className: 'flex flex-col gap-1.5' },
+              e('div', { className: 'flex items-center justify-between' },
+                e('div', { className: 'flex items-center gap-2.5' }, e('div', { className: 'w-3 h-3 rounded-full shadow-[0_0_8px_rgba(59,130,246,0.5)]', style: { backgroundColor: colorLong } }), e('span', { className: 'text-sm text-gray-300 font-semibold' }, 'Longs')),
+                e('span', { className: 'text-xs font-bold text-gray-400' }, `${longs.trades} (${Math.round(longPct * 100)}%)`)
+              ),
+              e('div', { className: 'flex justify-between text-[11px] text-gray-500 font-medium' },
+                e('span', { style: { marginLeft: '22px' } }, `${longs.winRate}% Win`),
+                e('span', { className: longs.pnl >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold' }, fmt$(longs.pnl))
+              )
+            ),
+            e('div', { className: 'w-full h-[1px] bg-gray-800/80' }),
+            e('div', { className: 'flex flex-col gap-1.5' },
+              e('div', { className: 'flex items-center justify-between' },
+                e('div', { className: 'flex items-center gap-2.5' }, e('div', { className: 'w-3 h-3 rounded-full shadow-[0_0_8px_rgba(245,158,11,0.5)]', style: { backgroundColor: colorShort } }), e('span', { className: 'text-sm text-gray-300 font-semibold' }, 'Shorts')),
+                e('span', { className: 'text-xs font-bold text-gray-400' }, `${shorts.trades} (${Math.round(shortPct * 100)}%)`)
+              ),
+              e('div', { className: 'flex justify-between text-[11px] text-gray-500 font-medium' },
+                e('span', { style: { marginLeft: '22px' } }, `${shorts.winRate}% Win`),
+                e('span', { className: shorts.pnl >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold' }, fmt$(shorts.pnl))
+              )
+            )
+          )
+        )
+      );
+    }
+
+    function ChecklistFailureList({ data, title }) {
+      if (!data || !data.length) return e(Card, null,
+        e('h3', { className: 'text-sm font-semibold text-gray-300 mb-2' }, title),
+        e('p', { className: 'text-xs text-gray-500' }, 'No data yet.')
+      );
+
+      return e(Card, { className: 'flex flex-col' },
+        e('h3', { className: 'text-sm font-semibold text-gray-300 mb-4' }, title),
+        e('div', { className: 'space-y-3' },
+          data.map((item, i) => e('div', { key: i, className: 'flex items-center justify-between gap-3' },
+            e('span', { className: 'text-xs text-gray-300 flex-1' }, item.label),
+            e('div', { className: 'flex items-center gap-2' },
+              e('div', { className: 'w-24 h-2 bg-white/[0.04] rounded-full overflow-hidden' },
+                e('div', { className: 'h-full bg-rose-500 rounded-full', style: { width: `${item.value}%` } })
+              ),
+              e('span', { className: 'text-xs font-bold text-gray-400 w-10 text-right' }, `${item.value}%`)
+            )
+          ))
+        )
+      );
+    }
+
+    // ---------- Dashboard ----------
+    function Dashboard({ trades, onDateClick }) {
+      const stats = useMemo(() => {
+        if (!trades.length) return null;
+        const wins = trades.filter(t => t.outcome === 'Win' || t.outcome === 'Target hit').length;
+        let totalPnL = 0, grossProfit = 0, grossLoss = 0;
+        let longTrades = 0, longWins = 0, longPnL = 0;
+        let shortTrades = 0, shortWins = 0, shortPnL = 0;
+
+        trades.forEach(t => {
+          const pnl = calcMetrics(t).pnl;
+          totalPnL += pnl;
+          if (pnl > 0) grossProfit += pnl;
+          if (pnl < 0) grossLoss += Math.abs(pnl);
+
+          const isWin = t.outcome === 'Win' || t.outcome === 'Target hit';
+          if (t.direction === 'Long') {
+            longTrades++;
+            longPnL += pnl;
+            if (isWin) longWins++;
+          } else {
+            shortTrades++;
+            shortPnL += pnl;
+            if (isWin) shortWins++;
+          }
+        });
+
+        const profitFactor = grossLoss === 0 ? (grossProfit > 0 ? 99.99 : 0) : Math.round((grossProfit / grossLoss) * 100) / 100;
+
+        const avgRR = trades.reduce((s, t) => s + calcMetrics(t).rr, 0) / trades.length;
+        const aPlusCount = trades.filter(t => t.psychology?.setupPlanLevel === 'A++').length;
+        const aPlusRate = trades.length ? Math.round((aPlusCount / trades.length) * 100) : 0;
+        const avgAdh = trades.reduce((s, t) => s + calcAdherence(t), 0) / trades.length;
+
+        return {
+          total: trades.length,
+          winRate: Math.round((wins / trades.length) * 100),
+          profitFactor,
+          avgRR: Math.round(avgRR * 100) / 100,
+          totalPnL: Math.round(totalPnL * 100) / 100,
+          aPlusRate,
+          avgAdh: Math.round(avgAdh),
+          longs: { trades: longTrades, winRate: longTrades ? Math.round((longWins / longTrades) * 100) : 0, pnl: Math.round(longPnL * 100) / 100 },
+          shorts: { trades: shortTrades, winRate: shortTrades ? Math.round((shortWins / shortTrades) * 100) : 0, pnl: Math.round(shortPnL * 100) / 100 }
+        };
+      }, [trades]);
+
+      const pnlByDay = useMemo(() => {
+        const map = {};
+        trades.forEach(t => {
+          const day = t.date.slice(0, 10);
+          const m = calcMetrics(t);
+          map[day] = (map[day] || 0) + m.pnl;
+        });
+        const days = Object.keys(map).sort();
+        return days.map(d => ({ date: d, label: d.slice(5), pnl: Math.round(map[d] * 100) / 100 }));
+      }, [trades]);
+
+      // Monthly discipline (rules followed) calculation
+      const monthlyDiscipline = useMemo(() => {
+        return stats.avgAdh; // Use overall stats which are already calculated
+      }, [stats]);
+
+
+
+      const winBySetup = useMemo(() => {
+        const st = {};
+        trades.forEach(t => {
+          const arr = t.setup.primary.length ? t.setup.primary : ['Unspecified'];
+          arr.forEach(s => {
+            if (!st[s]) st[s] = { w: 0, t: 0 };
+            st[s].t++;
+            if (t.outcome === 'Win' || t.outcome === 'Target hit') st[s].w++;
+          });
+        });
+        return Object.entries(st).map(([label, { w, t }]) => ({ label, value: t ? Math.round((w / t) * 100) : 0, suffix: '%' })).sort((a, b) => b.value - a.value);
+      }, [trades]);
+
+      const winBySession = useMemo(() => {
+        const st = {};
+        SESSIONS.forEach(s => st[s] = { w: 0, t: 0 });
+        trades.forEach(t => {
+          st[t.session].t++;
+          if (t.outcome === 'Win' || t.outcome === 'Target hit') st[t.session].w++;
+        });
+        return Object.entries(st).filter(([, v]) => v.t > 0).map(([label, { w, t }]) => ({ label, value: Math.round((w / t) * 100), suffix: '%' }));
+      }, [trades]);
+
+      const failRate = useMemo(() => {
+        if (!trades.length) return [];
+        const st = {};
+        CHECKLIST_DEF.forEach(x => st[x.k] = { n: 0, t: 0, l: x.l });
+        trades.forEach(t => {
+          CHECKLIST_DEF.forEach(x => {
+            const v = (x.k in (t.executionReview || {})) ? t.executionReview[x.k] : t.checklist[x.k];
+            if (v !== 'Skipped' && v !== undefined) {
+              st[x.k].t++;
+              if (x.k === 'noNews5min' ? v === 'Yes' : v === 'No') st[x.k].n++;
+            }
+          });
+        });
+        return Object.values(st).filter(s => s.t > 0).map(s => ({ label: s.l, value: Math.round((s.n / s.t) * 100), suffix: '%' })).sort((a, b) => b.value - a.value);
+      }, [trades]);
+
+      const pnlByHour = useMemo(() => {
+        const map = {};
+        trades.forEach(t => {
+          const m = calcMetrics(t);
+          const entryTime = t.entries && t.entries.length && t.entries[0].time 
+            ? t.entries[0].time 
+            : t.date.slice(11, 16);
+            
+          let hourLabel = 'Other';
+          if (entryTime && entryTime.includes(':')) {
+            const h = parseInt(entryTime.split(':')[0], 10);
+            hourLabel = `${h > 12 ? h - 12 : (h === 0 ? 12 : h)}${h >= 12 ? 'pm' : 'am'}`;
+          }
+          map[hourLabel] = (map[hourLabel] || 0) + m.pnl;
+        });
+        
+        const order = ['6am', '7am', '8am', '9am', '10am', '11am', '12pm', '1pm', '2pm', '3pm', '4pm', 'Other'];
+        return Object.keys(map)
+          .map(k => ({ label: k, value: map[k], orderIdx: order.indexOf(k) > -1 ? order.indexOf(k) : 99 }))
+          .sort((a, b) => a.orderIdx - b.orderIdx)
+          .map(d => ({ label: d.label, value: Math.round(d.value) }));
+      }, [trades]);
+
+      const pnlByDayOfWeek = useMemo(() => {
+        const map = {};
+        const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        trades.forEach(t => {
+          const m = calcMetrics(t);
+          const d = new Date(t.date);
+          const dayName = days[d.getDay()];
+          map[dayName] = (map[dayName] || 0) + m.pnl;
+        });
+        const order = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+        return order.filter(d => map[d] !== undefined).map(d => ({ label: d, value: Math.round(map[d]) }));
+      }, [trades]);
+
+
+      if (!stats) {
+        return e('div', { className: 'max-w-7xl mx-auto px-4 py-20 text-center' },
+          e('div', { className: 'max-w-md mx-auto' },
+            e('h2', { className: 'text-2xl font-extrabold text-white mb-3 tracking-tight' }, 'Everything you wanted to know about your trading.'),
+            e('p', { className: 'text-sm text-gray-500 mb-8 leading-relaxed' }, 'Build your edge through data. Log your first MNQ or MES trade to unlock analytics, streaks, and discipline tracking.'),
+            e('p', { className: 'text-[11px] text-gray-600' }, 'Your data stays local in your browser.')
+          )
+        );
+      }
+
+      return e('div', { className: 'max-w-7xl mx-auto px-4 py-6 space-y-6' },
+        e('div', { className: 'grid grid-cols-2 md:grid-cols-4 gap-4' },
+          e(StatCard, { label: 'Total P&L', value: fmt$(stats.totalPnL), color: stats.totalPnL >= 0 ? 'green' : 'red' }),
+          e(StatCard, { label: 'Profit Factor', value: stats.profitFactor, sub: 'Gross Profit / Gross Loss', color: stats.profitFactor >= 1.5 ? 'green' : stats.profitFactor >= 1 ? 'amber' : 'red' }),
+          e(StatCard, { label: 'Win Rate', value: `${stats.winRate}%`, sub: `${stats.total} Total Trades`, color: stats.winRate >= 50 ? 'green' : 'red' }),
+          e(StatCard, { label: 'Avg R:R', value: `${stats.avgRR}:1`, color: stats.avgRR >= 2.5 ? 'green' : 'amber' })
+        ),
+        e('div', { className: 'grid grid-cols-1 lg:grid-cols-3 gap-4' },
+          e('div', { className: 'lg:col-span-2' }, e(MonthlyCalendar, { pnlByDay, onDateClick, discipline: stats.avgAdh })),
+          e('div', { className: 'flex flex-col gap-4' },
+            e(ExpectancyStats, { trades }),
+            e(BestWorstDays, { pnlByDay }),
+            e(DirectionPieChart, { longs: stats.longs, shorts: stats.shorts, title: 'Direction Edge' })
+          )
+        ),
+        e('div', { className: 'grid grid-cols-2 gap-4' },
+          e(StatCard, { label: 'Premium Setups', value: `${stats.aPlusRate}%`, sub: 'A++ grade', color: 'blue' }),
+          e(StatCard, { label: 'Rules Followed', value: `${stats.avgAdh}%`, sub: '#1 Metric', color: stats.avgAdh >= 80 ? 'green' : stats.avgAdh >= 50 ? 'amber' : 'red' })
+        ),
+        e('div', { className: 'grid grid-cols-1 lg:grid-cols-2 gap-4' },
+          e(TimeProfitabilityChart, { hourlyData: pnlByHour, dailyData: pnlByDayOfWeek, setupData: winBySetup }),
+          e(ChecklistFailureList, { data: failRate, title: 'Checklist Failure Rate' })
+        )
+      );
+    }
+
+    // ---------- TradeForm ----------
+    function TradeForm({ trade, onSave, onCancel }) {
+      const [data, setData] = useState(() => trade ? JSON.parse(JSON.stringify(trade)) : emptyTrade());
+
+      const metrics = useMemo(() => {
+        const prices = ['stopPrice', 'targetPrice'];
+        if (prices.some(k => data[k] === '' || data[k] == null || isNaN(data[k]))) return null;
+        return calcMetrics(data);
+      }, [data.entryPrice, data.stopPrice, data.targetPrice, data.exitPrice, data.entries, data.exits, data.instrument, data.direction, data.contracts]);
+
+      const adherence = useMemo(() => calcAdherence(data), [data.checklist, data.psychology?.setupPlanLevel]);
+      const totalAdherence = adherence;
+
+      const suggested = useMemo(() => {
+        const prices = ['stopPrice', 'targetPrice'];
+        if (prices.some(k => data[k] === '' || data[k] == null || isNaN(data[k]))) return null;
+        return suggestOutcome(data);
+      }, [data.entryPrice, data.stopPrice, data.targetPrice, data.exitPrice, data.entries, data.exits, data.direction, data.contracts]);
+
+      const update = (path, val) => {
+        setData(prev => {
+          const next = JSON.parse(JSON.stringify(prev));
+          if (path.includes('.')) {
+            const parts = path.split('.');
+            let cur = next;
+            for (let i = 0; i < parts.length - 1; i++) {
+              if (cur[parts[i]] === undefined) cur[parts[i]] = {};
+              cur = cur[parts[i]];
+            }
+            cur[parts[parts.length - 1]] = val;
+          } else {
+            next[path] = val;
+          }
+          return next;
+        });
+      };
+
+      const handleSubmit = ev => {
+        ev.preventDefault();
+        const required = ['stopPrice', 'targetPrice'];
+        if (required.some(k => data[k] === '' || data[k] == null)) {
+          alert('Please fill in all required fields including prices.');
+          return;
+        }
+        const payload = JSON.parse(JSON.stringify(data));
+        ['stopPrice', 'targetPrice'].forEach(k => {
+          payload[k] = parseFloat(payload[k]);
+        });
+        
+        if (!payload.entries || payload.entries.length === 0) {
+          payload.entries = [{ time: '', price: parseFloat(payload.entryPrice || 0), contracts: payload.contracts || 1 }];
+        } else {
+          payload.entries.forEach(en => {
+            en.price = parseFloat(en.price);
+            en.contracts = parseFloat(en.contracts);
+          });
+          payload.entryPrice = payload.entries[0].price;
+          payload.contracts = payload.entries.reduce((s, x) => s + x.contracts, 0);
+        }
+
+        if (!payload.exits || payload.exits.length === 0) {
+          payload.exits = [{ price: parseFloat(payload.exitPrice || 0), contracts: payload.contracts }];
+        } else {
+          payload.exits.forEach(ex => {
+            ex.price = parseFloat(ex.price);
+            ex.contracts = parseFloat(ex.contracts);
+          });
+          // Sync legacy exit price just in case
+          payload.exitPrice = payload.exits[payload.exits.length - 1].price;
+        }
+        onSave(payload);
+      };
+
+      return e('form', { onSubmit: handleSubmit, className: 'max-w-5xl mx-auto px-4 py-8' },
+        e('div', { className: `rounded-2xl p-6 mb-8 text-center border border-white/[0.06] shadow-2xl ${totalAdherence >= 80 ? 'shadow-emerald-900/10 bg-emerald-500/[0.03]' : totalAdherence >= 50 ? 'shadow-amber-900/10 bg-amber-500/[0.03]' : 'shadow-rose-900/10 bg-rose-500/[0.03]'}` },
+          e('div', { className: 'text-[10px] uppercase tracking-[0.2em] text-gray-500 mb-2 font-semibold' }, 'Rules Followed Percentage'),
+          e('div', { className: 'text-6xl font-extrabold tracking-tighter text-white' }, `${totalAdherence}%`),
+          e('div', { className: 'text-sm mt-2 font-medium text-gray-400' }, totalAdherence >= 80 ? 'Locked in. Execute the plan.' : totalAdherence >= 50 ? 'Room to improve. Review your rules.' : 'Slow down. Protect your capital.'),
+          e('div', { className: 'flex items-center justify-center gap-4 mt-3' },
+            e('span', { className: 'text-[11px] text-gray-500 uppercase tracking-widest' }, `Rules Followed: `, e('span', { className: 'text-gray-300 font-semibold ml-1' }, `${totalAdherence}%`))
+          )
+        ),
+
+        e(FormSection, { title: 'Basic Info' },
+          e(Field, { label: 'Instrument' }, e(S, { value: data.instrument, onChange: v => update('instrument', v), opts: INSTRUMENTS })),
+          e(Field, { label: 'Direction' }, e(S, { value: data.direction, onChange: v => update('direction', v), opts: DIRECTIONS })),
+          e(Field, { label: 'Session' }, e(S, { value: data.session, onChange: v => update('session', v), opts: SESSIONS })),
+          e(Field, { label: 'Stop Loss' }, e(N, { value: data.stopPrice, onChange: v => update('stopPrice', v) })),
+          e(Field, { label: 'Target Price' }, e(N, { value: data.targetPrice, onChange: v => update('targetPrice', v) })),
+
+          e('div', { className: 'md:col-span-2 lg:col-span-3 mt-4 bg-[#0a0b10]/50 rounded-xl p-4 border border-white/[0.04]' },
+            e('label', { className: 'block text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-3' }, 'Entries (Scale-in)'),
+            e('div', { className: 'space-y-3' },
+              (data.entries && data.entries.length ? data.entries : [{ time: '', price: data.entryPrice || '', contracts: data.contracts || 1 }]).map((en, i) => e('div', { key: i, className: 'flex items-end gap-3' },
+                e('div', { className: 'w-32' }, e(Field, { label: 'Time' }, e('input', {
+                  type: 'time', value: en.time || '', onChange: ev => {
+                    const newEntries = JSON.parse(JSON.stringify(data.entries || [{ time: '', price: data.entryPrice || '', contracts: data.contracts || 1 }]));
+                    if (!newEntries[i]) newEntries[i] = { time: '', price: '', contracts: 1 };
+                    newEntries[i].time = ev.target.value;
+                    update('entries', newEntries);
+                  }, className: 'w-full bg-[#0a0b10] border border-white/[0.06] rounded-lg px-3 py-2.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/20 transition'
+                }))),
+                e('div', { className: 'flex-1' }, e(Field, { label: `Entry ${i + 1} Price` }, e(N, {
+                  value: en.price, onChange: v => {
+                    const newEntries = JSON.parse(JSON.stringify(data.entries || [{ time: '', price: data.entryPrice || '', contracts: data.contracts || 1 }]));
+                    if (!newEntries[i]) newEntries[i] = { time: '', price: '', contracts: 1 };
+                    newEntries[i].price = v;
+                    update('entries', newEntries);
+                  }
+                }))),
+                e('div', { className: 'w-24' }, e(Field, { label: 'Contracts' }, e(N, {
+                  value: en.contracts, onChange: v => {
+                    const newEntries = JSON.parse(JSON.stringify(data.entries || [{ time: '', price: data.entryPrice || '', contracts: data.contracts || 1 }]));
+                    if (!newEntries[i]) newEntries[i] = { time: '', price: '', contracts: 1 };
+                    newEntries[i].contracts = v;
+                    update('entries', newEntries);
+                  }, step: '1'
+                }))),
+                e('button', {
+                  type: 'button', onClick: () => {
+                    const newEntries = JSON.parse(JSON.stringify(data.entries || [{ time: '', price: data.entryPrice || '', contracts: data.contracts || 1 }]));
+                    newEntries.splice(i, 1);
+                    update('entries', newEntries);
+                  }, className: 'mb-1 text-gray-500 hover:text-red-400 p-2 transition rounded'
+                }, e('svg', { xmlns: 'http://www.w3.org/2000/svg', width: '16', height: '16', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: '2', strokeLinecap: 'round', strokeLinejoin: 'round' }, e('line', { x1: '18', y1: '6', x2: '6', y2: '18' }), e('line', { x1: '6', y1: '6', x2: '18', y2: '18' })))
+              )),
+              e('div', { className: 'flex items-center justify-between pt-2' },
+                e('button', {
+                  type: 'button', onClick: () => {
+                    const newEntries = JSON.parse(JSON.stringify(data.entries || [{ time: '', price: data.entryPrice || '', contracts: data.contracts || 1 }]));
+                    newEntries.push({ time: '', price: '', contracts: 1 });
+                    update('entries', newEntries);
+                  }, className: 'text-[11px] font-semibold text-blue-400 hover:text-blue-300 bg-blue-500/10 px-3 py-1.5 rounded-lg transition'
+                }, '+ Add Entry Leg'),
+                e('div', { className: 'text-xs font-medium text-gray-400' }, `Total Entry Contracts: ${(data.entries || [{ contracts: data.contracts || 1 }]).reduce((s, x) => s + (parseFloat(x.contracts) || 0), 0)}`)
+              )
+            )
+          ),
+
+          e('div', { className: 'md:col-span-2 lg:col-span-3 mt-4 mb-2 bg-[#0a0b10]/50 rounded-xl p-4 border border-white/[0.04]' },
+            e('label', { className: 'block text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-3' }, 'Exits (Partials)'),
+            e('div', { className: 'space-y-3' },
+              (data.exits && data.exits.length ? data.exits : [{ time: '', price: data.exitPrice || '', contracts: data.contracts || 1 }]).map((ex, i) => e('div', { key: i, className: 'flex items-end gap-3' },
+                e('div', { className: 'w-32' }, e(Field, { label: 'Time' }, e('input', {
+                  type: 'time', value: ex.time || '', onChange: ev => {
+                    const newExits = JSON.parse(JSON.stringify(data.exits || [{ time: '', price: data.exitPrice || '', contracts: data.contracts || 1 }]));
+                    if (!newExits[i]) newExits[i] = { time: '', price: '', contracts: 1 };
+                    newExits[i].time = ev.target.value;
+                    update('exits', newExits);
+                  }, className: 'w-full bg-[#0a0b10] border border-white/[0.06] rounded-lg px-3 py-2.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/20 transition'
+                }))),
+                e('div', { className: 'flex-1' }, e(Field, { label: `Exit ${i + 1} Price` }, e(N, {
+                  value: ex.price, onChange: v => {
+                    const newExits = JSON.parse(JSON.stringify(data.exits || [{ time: '', price: data.exitPrice || '', contracts: data.contracts || 1 }]));
+                    if (!newExits[i]) newExits[i] = { time: '', price: '', contracts: 1 };
+                    newExits[i].price = v;
+                    update('exits', newExits);
+                  }
+                }))),
+                e('div', { className: 'w-24' }, e(Field, { label: 'Contracts' }, e(N, {
+                  value: ex.contracts, onChange: v => {
+                    const newExits = JSON.parse(JSON.stringify(data.exits || [{ time: '', price: data.exitPrice || '', contracts: data.contracts || 1 }]));
+                    if (!newExits[i]) newExits[i] = { time: '', price: '', contracts: 1 };
+                    newExits[i].contracts = v;
+                    update('exits', newExits);
+                  }, step: '1'
+                }))),
+                e('button', {
+                  type: 'button', onClick: () => {
+                    const newExits = JSON.parse(JSON.stringify(data.exits || [{ time: '', price: data.exitPrice || '', contracts: data.contracts || 1 }]));
+                    newExits.splice(i, 1);
+                    update('exits', newExits);
+                  }, className: 'mb-1 text-gray-500 hover:text-red-400 p-2 transition rounded'
+                }, e('svg', { xmlns: 'http://www.w3.org/2000/svg', width: '16', height: '16', viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: '2', strokeLinecap: 'round', strokeLinejoin: 'round' }, e('line', { x1: '18', y1: '6', x2: '6', y2: '18' }), e('line', { x1: '6', y1: '6', x2: '18', y2: '18' })))
+              )),
+              e('div', { className: 'flex items-center justify-between pt-2' },
+                e('button', {
+                  type: 'button', onClick: () => {
+                    const newExits = JSON.parse(JSON.stringify(data.exits || [{ time: '', price: data.exitPrice || '', contracts: data.contracts || 1 }]));
+                    newExits.push({ time: '', price: '', contracts: 1 });
+                    update('exits', newExits);
+                  }, className: 'text-[11px] font-semibold text-blue-400 hover:text-blue-300 bg-blue-500/10 px-3 py-1.5 rounded-lg transition'
+                }, '+ Add Partial Exit'),
+                e('div', { className: 'text-xs font-medium text-gray-400' }, `Total Exit Contracts: ${(data.exits || [{ contracts: data.contracts || 1 }]).reduce((s, x) => s + (parseFloat(x.contracts) || 0), 0)} / ${data.contracts || 1}`)
+              )
+            )
+          ),
+          e(Field, { label: 'Outcome' },
+            e('div', { className: 'flex items-center gap-2' },
+              e(S, { value: data.outcome, onChange: v => update('outcome', v), opts: OUTCOMES }),
+              suggested && suggested !== data.outcome ? e('button', { type: 'button', onClick: () => update('outcome', suggested), className: 'text-[11px] bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-blue-400 px-2.5 py-1 rounded-lg transition' }, `→ Suggest: ${suggested}`) : null
+            )
+          ),
+          metrics ? e('div', { className: 'md:col-span-3 bg-white/[0.02] rounded-xl p-4 border border-white/[0.04] flex flex-wrap gap-5 text-sm' },
+            e('span', null, e('span', { className: 'text-[11px] text-gray-500 uppercase tracking-wider mr-1' }, 'Risk Ticks:'), e('span', { className: 'text-rose-400 font-mono font-semibold' }, metrics.rt)),
+            e('span', null, e('span', { className: 'text-[11px] text-gray-500 uppercase tracking-wider mr-1' }, 'Reward Ticks:'), e('span', { className: 'text-emerald-400 font-mono font-semibold' }, metrics.rwt)),
+            e('span', null, e('span', { className: 'text-[11px] text-gray-500 uppercase tracking-wider mr-1' }, 'R:R:'), e('span', { className: 'text-white font-mono font-semibold' }, `${metrics.rr}:1`)),
+            e('span', null, e('span', { className: 'text-[11px] text-gray-500 uppercase tracking-wider mr-1' }, 'Risk $:'), e('span', { className: 'text-white font-mono font-semibold' }, fmt$(metrics.risk$))),
+            e('span', null, e('span', { className: 'text-[11px] text-gray-500 uppercase tracking-wider mr-1' }, 'P&L:'), e('span', { className: metrics.pnl >= 0 ? 'text-emerald-400 font-mono font-semibold' : 'text-rose-400 font-mono font-semibold' }, fmt$(metrics.pnl)))
+          ) : null
+        ),
+
+        e(FormSection, { title: 'Setup Identification' },
+          e(Field, { label: 'Primary Setup (multi-select)', wide: true }, e(MultiTag, { opts: PRIMARY_SETUPS, selected: data.setup.primary, onChange: v => update('setup.primary', v) })),
+          e(Field, { label: 'HTF Bias' }, e(S, { value: data.setup.htfBias, onChange: v => update('setup.htfBias', v), opts: HTF_BIASES })),
+          e(Field, { label: 'HTF Timeframe' }, e(S, { value: data.setup.htfTimeframe, onChange: v => update('setup.htfTimeframe', v), opts: HTF_TIMEFRAMES })),
+          e(Field, { label: 'Entry Model' }, e(S, { value: data.setup.entryModel, onChange: v => update('setup.entryModel', v), opts: ENTRY_MODELS })),
+          e(Field, { label: 'Confluent liquidity above/below?' }, e(ToggleBool, { value: data.setup.confluentLiquidity, onChange: v => update('setup.confluentLiquidity', v) })),
+          e(Field, { label: 'Did price take liquidity before entry?' }, e(ToggleBool, { value: data.setup.tookLiquidityBeforeEntry, onChange: v => update('setup.tookLiquidityBeforeEntry', v) }))
+        ),
+
+        e(FormSection, { title: 'Chart Screenshots' },
+          e(Field, { label: '', wide: true }, e(ImageUpload, { label: 'HTF (Higher Time Frame) Screenshot', value: data.screenshots?.htf, onChange: v => update('screenshots.htf', v) })),
+          e(Field, { label: '', wide: true }, e(ImageUpload, { label: 'LTF (Lower Time Frame) Screenshot', value: data.screenshots?.ltf, onChange: v => update('screenshots.ltf', v) }))
+        ),
+
+        e(FormSection, { title: 'Pre-Trade & Execution Rules' },
+          e(Field, { label: 'Setup Plan Level' }, e(S, { value: data.psychology.setupPlanLevel || 'A++', onChange: v => update('psychology.setupPlanLevel', v), opts: ['A++', 'B+', 'Gamble'] })),
+          ...CHECKLIST_DEF.map(item => e(Field, { key: item.k, label: item.l }, e(Toggle3, { value: data.checklist[item.k], onChange: v => update(`checklist.${item.k}`, v) })))
+        ),
+
+        e(FormSection, { title: 'Post-Trade Reflection (Psychology & Execution)' },
+          e(Field, { label: 'Did you wait for setup to fully form?' }, e(S, { value: data.psychology.waitedForSetup, onChange: v => update('psychology.waitedForSetup', v), opts: WAITED_OPTIONS })),
+          e(Field, { label: 'Did you move stop after entry?' }, e(S, { value: data.psychology.movedStop, onChange: v => update('psychology.movedStop', v), opts: MOVED_STOP_OPTIONS })),
+          e(Field, { label: 'Did you exit early (before target)?' }, e(S, { value: data.psychology.exitedEarly, onChange: v => update('psychology.exitedEarly', v), opts: EXITED_EARLY_OPTIONS })),
+          data.psychology.exitedEarly === 'Yes' ? e(Field, { label: 'Why did you exit early?' }, e(S, { value: data.psychology.exitedEarlyWhy, onChange: v => update('psychology.exitedEarlyWhy', v), opts: EXITED_EARLY_WHY })) : null,
+          e(Field, { label: 'What did I do right on this trade?', wide: true }, e(T, { value: data.psychology.whatDidIRight || '', onChange: v => update('psychology.whatDidIRight', v), rows: 3 })),
+          e(Field, { label: 'What did I do wrong on this trade?', wide: true }, e(T, { value: data.psychology.whatDidIWrong || '', onChange: v => update('psychology.whatDidIWrong', v), rows: 3 }))
+        ),
+
+        e('div', { className: 'flex items-center justify-end gap-3 pt-4' },
+          e('button', { type: 'button', onClick: onCancel, className: 'px-6 py-3 rounded-xl text-sm font-semibold bg-white/[0.03] text-gray-300 border border-white/[0.06] hover:bg-white/[0.06] hover:text-white transition' }, 'Cancel'),
+          e('button', { type: 'submit', className: 'px-6 py-3 rounded-xl text-sm font-semibold bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-900/20 transition' }, trade ? 'Update Trade' : 'Save Trade')
+        )
+      );
+    }
+
+    // ---------- DailySessionForm ----------
+    function DailySessionForm({ session, initialTradeIdx, onSave, onCancel }) {
+      const [data, setData] = useState(() => {
+        if (session) return JSON.parse(JSON.stringify(session));
+        const d = new Date();
+        return { id: '', date: `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`, routine: emptyRoutine(), trades: [] };
+      });
+      const [editingTradeIdx, setEditingTradeIdx] = useState(initialTradeIdx !== undefined ? initialTradeIdx : null);
+
+      if (editingTradeIdx !== null) {
+        const isNew = editingTradeIdx === -1;
+        const tToEdit = isNew ? emptyTrade() : data.trades[editingTradeIdx];
+        if (isNew) tToEdit.date = data.date + 'T09:30';
+        return e('div', { className: 'fixed inset-0 z-50 bg-black/95 overflow-y-auto p-4 flex justify-center py-10' },
+          e('div', { className: 'w-full' },
+            e(TradeForm, {
+              trade: tToEdit,
+              onSave: (updatedTrade) => {
+                const next = JSON.parse(JSON.stringify(data));
+                if (!updatedTrade.id) updatedTrade.id = Date.now().toString(36);
+                if (isNew) next.trades.push(updatedTrade);
+                else next.trades[editingTradeIdx] = updatedTrade;
+                setData(next);
+                setEditingTradeIdx(null);
+              },
+              onCancel: () => setEditingTradeIdx(null)
+            })
+          )
+        );
+      }
+
+      const updateR = (section, key, val) => {
+        setData(prev => {
+          const next = JSON.parse(JSON.stringify(prev));
+          next.routine[section][key] = val;
+          return next;
+        });
+      };
+
+      const dayPnL = data.trades.reduce((sum, t) => sum + calcMetrics(t).pnl, 0);
+
+      const disciplineItems = [{ k: 'meditation', l: 'Meditation' }, { k: 'workout', l: 'Workout' }, { k: 'tradeJournal', l: 'Trade Journal' }];
+      const preMarketItems = [{ k: 'meditation5min', l: '5-Min Meditation' }, { k: 'htfAnalysis', l: 'HTF Analysis' }, { k: 'markLevels', l: 'Mark Levels' }, { k: 'tradePlan', l: 'Trade Plan' }, { k: 'newsCheck', l: 'News Check' }];
+
+      const dCount = disciplineItems.filter(i => data.routine.discipline[i.k]).length;
+      const dPct = Math.round((dCount / 3) * 100);
+      const pmCount = preMarketItems.filter(i => data.routine.preMarket[i.k]).length;
+      const pmPct = Math.round((pmCount + (data.routine.preMarket.stateOfMind ? 1 : 0) + (data.routine.preMarket.preMarketNotes || data.routine.preMarket.journalState ? 1 : 0)) / 7 * 100);
+
+      return e('div', { className: 'max-w-5xl mx-auto px-4 py-8 space-y-6' },
+        e('div', { className: 'flex items-center justify-between mb-8' },
+          e('div', { className: 'flex items-center gap-4' },
+            e('label', { className: 'text-[11px] font-bold text-gray-500 uppercase tracking-widest' }, 'Session Date'),
+            e('input', { type: 'date', value: data.date, onChange: ev => setData({ ...data, date: ev.target.value }), className: 'bg-[#0a0b10] border border-white/[0.06] rounded-lg px-4 py-2 text-sm text-gray-100 font-semibold focus:outline-none focus:border-blue-500' })
+          ),
+          e('div', { className: 'flex items-center gap-3' },
+            e('button', { onClick: onCancel, className: 'px-5 py-2.5 rounded-xl text-sm font-semibold bg-white/[0.03] text-gray-300 border border-white/[0.06] hover:bg-white/[0.06] transition' }, 'Cancel'),
+            e('button', { onClick: () => onSave(data), className: 'px-6 py-2.5 rounded-xl text-sm font-semibold bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-900/20 transition' }, 'Save Session')
+          )
+        ),
+
+        e('div', { className: 'grid grid-cols-1 md:grid-cols-2 gap-6' },
+          e('div', { className: 'bg-[#0a0b10] rounded-xl border border-white/[0.04] overflow-hidden card-glow flex flex-col' },
+            e('div', { className: 'bg-white/[0.02] px-5 py-3 border-b border-white/[0.04] flex items-center justify-between' },
+              e('h2', { className: 'text-[11px] font-bold text-gray-300 uppercase tracking-[0.1em]' }, 'Discipline'),
+              e('span', { className: `text-xs font-extrabold ${dPct >= 80 ? 'text-emerald-400' : dPct >= 50 ? 'text-amber-400' : 'text-rose-400'}` }, `${dPct}%`)
+            ),
+            e('div', { className: 'p-5 space-y-4 flex-1 flex flex-col' },
+              ...disciplineItems.map(item => e('label', { key: item.k, className: 'flex items-center gap-3 cursor-pointer group' },
+                e('input', { type: 'checkbox', checked: data.routine.discipline[item.k], onChange: ev => updateR('discipline', item.k, ev.target.checked), className: 'w-4 h-4 rounded border-gray-600 bg-gray-900 text-blue-600 accent-blue-600 cursor-pointer' }),
+                e('span', { className: 'text-sm text-gray-300 group-hover:text-white transition font-medium' }, item.l)
+              )),
+              e('div', { className: 'flex-1 pt-2' },
+                e('label', { className: 'block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2' }, 'Trade Journal Notes'),
+                e('textarea', { rows: 3, value: data.routine.discipline.tradeJournalNotes, onChange: ev => updateR('discipline', 'tradeJournalNotes', ev.target.value), className: 'w-full bg-[#050507] border border-white/[0.06] rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500 resize-none', placeholder: 'Review yesterday. Emotions, mistakes, lessons...' })
+              )
+            )
+          ),
+          e('div', { className: 'bg-[#0a0b10] rounded-xl border border-white/[0.04] overflow-hidden card-glow flex flex-col' },
+            e('div', { className: 'bg-white/[0.02] px-5 py-3 border-b border-white/[0.04] flex items-center justify-between' },
+              e('h2', { className: 'text-[11px] font-bold text-gray-300 uppercase tracking-[0.1em]' }, 'Pre-Market'),
+              e('span', { className: `text-xs font-extrabold ${pmPct >= 80 ? 'text-emerald-400' : pmPct >= 50 ? 'text-amber-400' : 'text-rose-400'}` }, `${pmPct}%`)
+            ),
+            e('div', { className: 'p-5 space-y-4 flex-1 flex flex-col' },
+              e('div', { className: 'flex flex-wrap gap-x-6 gap-y-3' },
+                ...preMarketItems.map(item => e('label', { key: item.k, className: 'flex items-center gap-2 cursor-pointer group' },
+                  e('input', { type: 'checkbox', checked: data.routine.preMarket[item.k], onChange: ev => updateR('preMarket', item.k, ev.target.checked), className: 'w-4 h-4 rounded border-gray-600 bg-gray-900 text-blue-600 accent-blue-600 cursor-pointer' }),
+                  e('span', { className: 'text-sm text-gray-300 group-hover:text-white transition font-medium' }, item.l)
+                ))
+              ),
+              e('div', { className: 'pt-2' },
+                e('label', { className: 'block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2' }, 'State of Mind Check'),
+                e('div', { className: 'flex gap-2' },
+                  ['Calm', 'Fear', 'Confidence'].map(mind => e('button', {
+                    key: mind, type: 'button', onClick: () => updateR('preMarket', 'stateOfMind', mind),
+                    className: `flex-1 py-1.5 rounded-lg text-xs font-semibold border transition ${data.routine.preMarket.stateOfMind === mind ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-900/20' : 'bg-[#050507] border-white/[0.06] text-gray-400 hover:text-gray-200'}`
+                  }, mind))
+                )
+              ),
+              e('div', { className: 'flex-1 pt-1' },
+                e('label', { className: 'block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2' }, 'Premarket Notes & Thoughts'),
+                e('textarea', { rows: 2, value: data.routine.preMarket.preMarketNotes !== undefined ? data.routine.preMarket.preMarketNotes : data.routine.preMarket.journalState || '', onChange: ev => updateR('preMarket', 'preMarketNotes', ev.target.value), className: 'w-full bg-[#050507] border border-white/[0.06] rounded-lg px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-blue-500 resize-none', placeholder: 'Enter your premarket notes and thoughts...' })
+              )
+            )
+          )
+        ),
+
+        e('div', { className: 'bg-[#0a0b10] rounded-xl border border-white/[0.04] overflow-hidden card-glow' },
+          e('div', { className: 'bg-white/[0.02] px-5 py-3 border-b border-white/[0.04] flex items-center justify-between' },
+            e('h2', { className: 'text-[11px] font-bold text-gray-300 uppercase tracking-[0.1em]' }, 'Session Trades'),
+            e('button', { onClick: () => setEditingTradeIdx(-1), className: 'px-4 py-1.5 rounded-lg bg-blue-600/20 text-blue-400 border border-blue-500/30 hover:bg-blue-600/30 text-xs font-bold transition flex items-center gap-1' }, '+ Add Trade')
+          ),
+          e('div', { className: 'overflow-x-auto' },
+            e('table', { className: 'w-full text-sm' },
+              e('thead', null, e('tr', { className: 'bg-[#050507] text-gray-400 border-b border-white/[0.04]' },
+                e('th', { className: 'text-left px-5 py-3 font-semibold text-[11px] uppercase tracking-wider' }, 'Time'),
+                e('th', { className: 'text-left px-5 py-3 font-semibold text-[11px] uppercase tracking-wider' }, 'Inst'),
+                e('th', { className: 'text-left px-5 py-3 font-semibold text-[11px] uppercase tracking-wider' }, 'Dir'),
+                e('th', { className: 'text-left px-5 py-3 font-semibold text-[11px] uppercase tracking-wider' }, 'Outcome'),
+                e('th', { className: 'text-left px-5 py-3 font-semibold text-[11px] uppercase tracking-wider' }, 'P&L'),
+                e('th', { className: 'text-left px-5 py-3 font-semibold text-[11px] uppercase tracking-wider' }, 'Actions')
+              )),
+              e('tbody', null,
+                data.trades.length === 0
+                  ? e('tr', null, e('td', { colSpan: 6, className: 'px-5 py-10 text-center text-gray-500 font-medium' }, 'No trades logged. Click "+ Add Trade" to log an execution.'))
+                  : data.trades.map((t, i) => {
+                    const m = calcMetrics(t);
+                    return e('tr', { key: i, className: 'border-b border-white/[0.02] hover:bg-white/[0.01] transition' },
+                      e('td', { className: 'px-5 py-3 text-gray-300 font-mono text-xs' }, t.date.slice(11, 16)),
+                      e('td', { className: 'px-5 py-3 font-bold text-gray-200' }, t.instrument),
+                      e('td', { className: 'px-5 py-3' }, e('span', { className: `font-bold ${t.direction === 'Long' ? 'text-emerald-400' : 'text-rose-400'}` }, t.direction)),
+                      e('td', { className: 'px-5 py-3' }, e('span', { className: `px-2.5 py-1 rounded-md text-[10px] uppercase font-bold tracking-wider border ${t.outcome === 'Win' || t.outcome === 'Target hit' ? 'bg-emerald-900/30 text-emerald-400 border-emerald-500/30' : t.outcome === 'Loss' ? 'bg-rose-900/30 text-rose-400 border-rose-500/30' : 'bg-amber-900/30 text-amber-400 border-amber-500/30'}` }, t.outcome)),
+                      e('td', { className: `px-5 py-3 font-mono font-bold tracking-tight text-base ${m.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}` }, fmt$(m.pnl)),
+                      e('td', { className: 'px-5 py-3 whitespace-nowrap' },
+                        e('button', { onClick: () => setEditingTradeIdx(i), className: 'text-blue-400 hover:text-blue-300 text-xs font-bold px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 rounded-md mr-2 transition' }, 'Edit'),
+                        e('button', {
+                          onClick: () => {
+                            if (window.confirm('Remove this trade?')) {
+                              const next = JSON.parse(JSON.stringify(data));
+                              next.trades.splice(i, 1);
+                              setData(next);
+                            }
+                          }, className: 'text-rose-400 hover:text-rose-300 text-xs font-bold px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 rounded-md transition'
+                        }, 'Del')
+                      )
+                    );
+                  })
+              )
+            )
+          ),
+          e('div', { className: 'bg-white/[0.01] px-5 py-4 flex justify-between items-center' },
+            e('span', { className: 'text-[11px] font-bold text-gray-500 uppercase tracking-widest' }, 'Net Session P&L'),
+            e('span', { className: `text-2xl font-extrabold tracking-tight ${dayPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}` }, fmt$(dayPnL))
+          )
+        ),
+
+        e('div', { className: 'bg-[#0a0b10] rounded-xl border border-white/[0.04] overflow-hidden card-glow' },
+          e('div', { className: 'bg-white/[0.02] px-5 py-3 border-b border-white/[0.04] flex items-center justify-between' },
+            e('h2', { className: 'text-[11px] font-bold text-gray-300 uppercase tracking-[0.1em]' }, 'Post-Session Review')
+          ),
+          e('div', { className: 'p-5 grid grid-cols-1 md:grid-cols-2 gap-5' },
+            e('div', null,
+              e('label', { className: 'block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2' }, 'What did I do right?'),
+              e('textarea', { rows: 3, value: data.routine.postMarket?.whatDidIRight || '', onChange: ev => {
+                const next = JSON.parse(JSON.stringify(data));
+                if (!next.routine.postMarket) next.routine.postMarket = { whatDidIRight: '', whatDidIWrong: '' };
+                next.routine.postMarket.whatDidIRight = ev.target.value;
+                setData(next);
+              }, className: 'w-full bg-[#050507] border border-white/[0.06] rounded-lg px-3 py-2 text-sm text-emerald-100/90 focus:outline-none focus:border-emerald-500/50 resize-none', placeholder: 'What went well today...' })
+            ),
+            e('div', null,
+              e('label', { className: 'block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2' }, 'What did I do wrong?'),
+              e('textarea', { rows: 3, value: data.routine.postMarket?.whatDidIWrong || '', onChange: ev => {
+                const next = JSON.parse(JSON.stringify(data));
+                if (!next.routine.postMarket) next.routine.postMarket = { whatDidIRight: '', whatDidIWrong: '' };
+                next.routine.postMarket.whatDidIWrong = ev.target.value;
+                setData(next);
+              }, className: 'w-full bg-[#050507] border border-white/[0.06] rounded-lg px-3 py-2 text-sm text-rose-100/90 focus:outline-none focus:border-rose-500/50 resize-none', placeholder: 'Mistakes made, rules broken...' })
+            )
+          )
+        )
+      );
+    }
+
+    // ---------- TradeDetailsModal ----------
+    function TradeDetailsModal({ trade, routine, onClose }) {
+      const [previewImage, setPreviewImage] = useState(null);
+      const m = useMemo(() => calcMetrics(trade), [trade]);
+      const adherence = useMemo(() => calcAdherence(trade), [trade]);
+      
+      const pnlColor = m.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
+      const isWin = trade.outcome === 'Win' || trade.outcome === 'Target hit';
+      
+      return e('div', { className: 'fixed inset-0 z-[200] bg-black/80 backdrop-blur-md overflow-y-auto p-4 flex justify-center py-10', onClick: onClose },
+        e('div', { className: 'relative bg-[#0f1117] border border-white/[0.06] rounded-2xl w-full max-w-4xl shadow-2xl flex flex-col my-auto', onClick: e => e.stopPropagation() },
+          e('button', { onClick: onClose, className: 'absolute top-4 right-4 p-2 text-gray-500 hover:text-white bg-white/[0.02] hover:bg-white/[0.06] rounded-full transition z-10' },
+            e('svg', { xmlns: 'http://www.w3.org/2000/svg', className: 'h-5 w-5', fill: 'none', viewBox: '0 0 24 24', stroke: 'currentColor' }, e('path', { strokeLinecap: 'round', strokeLinejoin: 'round', strokeWidth: 2, d: 'M6 18L18 6M6 6l12 12' }))
+          ),
+          e('div', { className: 'p-8 flex flex-col gap-8' },
+            // Header
+            e('div', { className: 'flex justify-between items-start border-b border-white/[0.04] pb-6' },
+              e('div', { className: 'flex flex-col gap-2' },
+                e('div', { className: 'flex items-center gap-3' },
+                  e('span', { className: 'text-3xl font-extrabold text-white tracking-tight' }, trade.instrument),
+                  e('span', { className: `px-3 py-1 rounded-md text-xs font-bold uppercase tracking-widest ${trade.direction === 'Long' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}` }, trade.direction),
+                  e('span', { className: `px-3 py-1 rounded-md text-xs font-bold uppercase tracking-widest border ${isWin ? 'bg-emerald-900/30 text-emerald-400 border-emerald-500/30' : trade.outcome === 'Loss' ? 'bg-rose-900/30 text-rose-400 border-rose-500/30' : 'bg-amber-900/30 text-amber-400 border-amber-500/30'}` }, trade.outcome)
+                ),
+                e('div', { className: 'text-sm text-gray-400 font-medium' }, fmtDate(trade.date), ' · ', trade.session)
+              ),
+              e('div', { className: 'text-right flex flex-col items-end gap-1' },
+                e('div', { className: `text-4xl font-extrabold tracking-tighter ${pnlColor}` }, fmt$(m.pnl)),
+                e('div', { className: 'text-sm font-semibold text-gray-500' }, `${m.rr}:1 RR · ${m.rt} Ticks Risk`)
+              )
+            ),
+            
+            // Grid of details
+            e('div', { className: 'grid grid-cols-1 md:grid-cols-2 gap-6' },
+              // Left Column
+              e('div', { className: 'space-y-6' },
+                routine && e('div', { className: 'bg-[#0a0b10] rounded-xl border border-white/[0.04] p-5 card-glow flex flex-col gap-4' },
+                  e('div', { className: 'flex justify-between items-center pb-3 border-b border-white/[0.04]' },
+                    e('h3', { className: 'text-[11px] font-bold text-gray-500 uppercase tracking-widest' }, 'Session Routine'),
+                    e('span', { className: `text-xs font-extrabold ${calcRoutineScore(routine) >= 80 ? 'text-emerald-400' : 'text-amber-400'}` }, `${calcRoutineScore(routine)}% Score`)
+                  ),
+                  e('div', { className: 'flex flex-wrap gap-2' },
+                    ['meditation', 'workout', 'tradeJournal'].filter(k => routine.discipline && routine.discipline[k]).map(k => e('span', { key: k, className: 'px-2 py-1 bg-white/[0.03] rounded text-[10px] text-gray-400 font-medium' }, k === 'tradeJournal' ? 'Journal' : k.charAt(0).toUpperCase() + k.slice(1))),
+                    ['meditation5min', 'htfAnalysis', 'markLevels', 'tradePlan', 'newsCheck'].filter(k => routine.preMarket && routine.preMarket[k]).map(k => e('span', { key: k, className: 'px-2 py-1 bg-white/[0.03] rounded text-[10px] text-gray-400 font-medium' }, k.replace(/([A-Z])/g, ' $1').trim()))
+                  ),
+                  (routine.preMarket?.preMarketNotes || routine.postMarket?.whatDidIRight || routine.postMarket?.whatDidIWrong) ? e('div', { className: 'space-y-3 mt-2' },
+                    routine.preMarket?.preMarketNotes && e('div', null, e('div', { className: 'text-[10px] text-gray-600 uppercase mb-1' }, 'Pre-Market Notes'), e('div', { className: 'text-xs text-gray-300' }, routine.preMarket.preMarketNotes)),
+                    routine.postMarket?.whatDidIRight && e('div', null, e('div', { className: 'text-[10px] text-emerald-600/70 uppercase mb-1' }, 'What went right'), e('div', { className: 'text-xs text-emerald-200/90' }, routine.postMarket.whatDidIRight)),
+                    routine.postMarket?.whatDidIWrong && e('div', null, e('div', { className: 'text-[10px] text-rose-600/70 uppercase mb-1' }, 'What went wrong'), e('div', { className: 'text-xs text-rose-200/90' }, routine.postMarket.whatDidIWrong))
+                  ) : e('div', { className: 'text-xs text-gray-500 italic' }, 'No routine notes logged for this session.')
+                ),
+                e('div', { className: 'bg-[#0a0b10] rounded-xl border border-white/[0.04] p-5 card-glow' },
+                  e('h3', { className: 'text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-4' }, 'Execution Details'),
+                  e('div', { className: 'grid grid-cols-2 gap-4' },
+                    e('div', null, e('div', { className: 'text-[10px] text-gray-600 uppercase mb-1' }, 'Avg Entry Price'), e('div', { className: 'font-mono text-gray-200' }, m.avgEntryPrice ? m.avgEntryPrice.toFixed(2) : trade.entryPrice)),
+                    e('div', null, e('div', { className: 'text-[10px] text-gray-600 uppercase mb-1' }, 'Stop Loss'), e('div', { className: 'font-mono text-gray-200' }, trade.stopPrice)),
+                    e('div', null, e('div', { className: 'text-[10px] text-gray-600 uppercase mb-1' }, 'Target Price'), e('div', { className: 'font-mono text-gray-200' }, trade.targetPrice)),
+                    e('div', null, e('div', { className: 'text-[10px] text-gray-600 uppercase mb-1' }, 'Total Contracts'), e('div', { className: 'font-mono text-gray-200' }, m.totalEntryContracts || trade.contracts))
+                  ),
+                  e('div', { className: 'mt-4 pt-4 border-t border-white/[0.04]' },
+                    e('div', { className: 'text-[10px] text-gray-600 uppercase mb-2' }, 'Entry Legs'),
+                    (trade.entries || [{ price: trade.entryPrice, contracts: trade.contracts }]).map((en, i) => e('div', { key: i, className: 'flex justify-between items-center text-sm py-1' },
+                      e('span', { className: 'text-gray-400' }, `Entry ${i+1}${en.time ? ` (${en.time})` : ''}`),
+                      e('span', { className: 'font-mono text-gray-200' }, `${en.contracts} @ ${en.price}`)
+                    ))
+                  ),
+                  e('div', { className: 'mt-4 pt-4 border-t border-white/[0.04]' },
+                    e('div', { className: 'text-[10px] text-gray-600 uppercase mb-2' }, 'Partial Exits'),
+                    (trade.exits || [{ price: trade.exitPrice, contracts: trade.contracts }]).map((ex, i) => e('div', { key: i, className: 'flex justify-between items-center text-sm py-1' },
+                      e('span', { className: 'text-gray-400' }, `Exit ${i+1}${ex.time ? ` (${ex.time})` : ''}`),
+                      e('span', { className: 'font-mono text-gray-200' }, `${ex.contracts} @ ${ex.price}`)
+                    ))
+                  )
+                ),
+                
+                e('div', { className: 'bg-[#0a0b10] rounded-xl border border-white/[0.04] p-5 card-glow' },
+                  e('h3', { className: 'text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-4' }, 'Setup Context'),
+                  e('div', { className: 'space-y-3' },
+                    e('div', null, e('div', { className: 'text-[10px] text-gray-600 uppercase mb-1' }, 'Primary Setups'), e('div', { className: 'flex flex-wrap gap-1.5' }, trade.setup.primary.length ? trade.setup.primary.map(s => e('span', { key: s, className: 'px-2 py-1 bg-blue-500/10 text-blue-400 text-[10px] rounded border border-blue-500/20' }, s)) : e('span', { className: 'text-gray-500 text-xs' }, 'None'))),
+                    e('div', null, e('div', { className: 'text-[10px] text-gray-600 uppercase mb-1' }, 'HTF Context'), e('div', { className: 'text-sm text-gray-300' }, `${trade.setup.htfBias} on ${trade.setup.htfTimeframe}`)),
+                    e('div', null, e('div', { className: 'text-[10px] text-gray-600 uppercase mb-1' }, 'Entry Model'), e('div', { className: 'text-sm text-gray-300' }, trade.setup.entryModel)),
+                    e('div', { className: 'flex gap-4' }, 
+                      e('div', null, e('div', { className: 'text-[10px] text-gray-600 uppercase mb-1' }, 'Confluent Liq.'), e('div', { className: `text-xs font-bold ${trade.setup.confluentLiquidity ? 'text-emerald-400' : 'text-gray-500'}` }, trade.setup.confluentLiquidity ? 'Yes' : 'No')),
+                      e('div', null, e('div', { className: 'text-[10px] text-gray-600 uppercase mb-1' }, 'Took Liq. Before'), e('div', { className: `text-xs font-bold ${trade.setup.tookLiquidityBeforeEntry ? 'text-emerald-400' : 'text-gray-500'}` }, trade.setup.tookLiquidityBeforeEntry ? 'Yes' : 'No'))
+                    )
+                  )
+                )
+              ),
+              
+              // Right Column
+              e('div', { className: 'space-y-6' },
+                e('div', { className: 'bg-[#0a0b10] rounded-xl border border-white/[0.04] p-5 card-glow relative overflow-hidden' },
+                  e('div', { className: `absolute top-0 right-0 p-4 text-3xl font-extrabold opacity-10 ${adherence >= 80 ? 'text-emerald-500' : adherence >= 50 ? 'text-amber-500' : 'text-rose-500'}` }, `${adherence}%`),
+                  e('h3', { className: 'text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-4' }, 'Pre-Trade & Execution Rules'),
+                  e('div', { className: 'mb-3 pb-3 border-b border-white/[0.04] flex items-center justify-between' },
+                    e('span', { className: 'text-xs text-gray-400 font-medium' }, 'Setup Plan Level:'),
+                    e('span', { className: `text-xs font-bold px-2 py-0.5 rounded ${trade.psychology.setupPlanLevel === 'A++' ? 'bg-blue-500/20 text-blue-400' : trade.psychology.setupPlanLevel === 'B+' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}` }, trade.psychology.setupPlanLevel || 'A++')
+                  ),
+                  e('div', { className: 'space-y-2' },
+                    CHECKLIST_DEF.map(item => {
+                      const v = trade.checklist[item.k];
+                      let icon = e('span', { className: 'text-gray-600' }, '➖');
+                      let color = 'text-gray-500';
+                      if (v === 'Yes') { icon = e('span', { className: 'text-emerald-500' }, '✓'); color = 'text-gray-300'; }
+                      else if (v === 'No') { icon = e('span', { className: 'text-rose-500' }, '✗'); color = 'text-gray-400'; }
+                      return e('div', { key: item.k, className: 'flex items-start gap-2 text-[11px]' }, icon, e('span', { className: color }, item.l));
+                    })
+                  )
+                ),
+                
+                e('div', { className: 'bg-[#0a0b10] rounded-xl border border-white/[0.04] p-5 card-glow' },
+                  e('h3', { className: 'text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-4' }, 'Post-Trade Reflection'),
+                  e('div', { className: 'space-y-3' },
+                    e('div', { className: 'flex justify-between items-center text-xs' }, e('span', { className: 'text-gray-400' }, 'Waited for setup?'), e('span', { className: 'text-gray-200 font-medium' }, trade.psychology.waitedForSetup)),
+                    e('div', { className: 'flex justify-between items-center text-xs' }, e('span', { className: 'text-gray-400' }, 'Moved stop?'), e('span', { className: 'text-gray-200 font-medium' }, trade.psychology.movedStop)),
+                    e('div', { className: 'flex justify-between items-center text-xs' }, e('span', { className: 'text-gray-400' }, 'Exited early?'), e('span', { className: 'text-gray-200 font-medium' }, trade.psychology.exitedEarly)),
+                    trade.psychology.exitedEarly === 'Yes' && e('div', { className: 'flex justify-between items-center text-xs' }, e('span', { className: 'text-gray-400' }, 'Why early?'), e('span', { className: 'text-gray-200 font-medium' }, trade.psychology.exitedEarlyWhy)),
+                    e('div', { className: 'pt-2 space-y-3' },
+                      e('div', null,
+                        e('div', { className: 'text-[10px] text-gray-600 uppercase mb-1' }, 'What did I do right?'),
+                        e('div', { className: 'text-xs text-emerald-100/80 italic bg-emerald-500/5 p-3 rounded-lg border border-emerald-500/10 whitespace-pre-wrap' }, trade.psychology.whatDidIRight || 'No notes.')
+                      ),
+                      e('div', null,
+                        e('div', { className: 'text-[10px] text-gray-600 uppercase mb-1' }, 'What did I do wrong?'),
+                        e('div', { className: 'text-xs text-rose-100/80 italic bg-rose-500/5 p-3 rounded-lg border border-rose-500/10 whitespace-pre-wrap' }, trade.psychology.whatDidIWrong || 'No notes.')
+                      )
+                    )
+                  )
+                )
+              )
+            ),
+            
+            // Charts
+            (trade.screenshots?.htf || trade.screenshots?.ltf) ? e('div', { className: 'bg-[#0a0b10] rounded-xl border border-white/[0.04] p-5 card-glow' },
+              e('h3', { className: 'text-[11px] font-bold text-gray-500 uppercase tracking-widest mb-4' }, 'Charts'),
+              e('div', { className: 'grid grid-cols-1 md:grid-cols-2 gap-4' },
+                trade.screenshots?.htf && e('div', null, e('div', { className: 'text-[10px] text-gray-600 uppercase mb-2 text-center' }, 'Higher Time Frame'), e('img', { src: trade.screenshots.htf, className: 'w-full rounded-lg border border-white/[0.06] cursor-pointer hover:opacity-90 transition', onClick: () => setPreviewImage(trade.screenshots.htf) })),
+                trade.screenshots?.ltf && e('div', null, e('div', { className: 'text-[10px] text-gray-600 uppercase mb-2 text-center' }, 'Lower Time Frame'), e('img', { src: trade.screenshots.ltf, className: 'w-full rounded-lg border border-white/[0.06] cursor-pointer hover:opacity-90 transition', onClick: () => setPreviewImage(trade.screenshots.ltf) }))
+              )
+            ) : null
+          )
+        ),
+        previewImage ? e(ZoomableImageModal, { src: previewImage, onClose: () => setPreviewImage(null) }) : null
+      );
+    }
+
+    // ---------- Journal ----------
+    function Journal({ sessions, onEditSession, onDeleteSession, onEditTrade, onDeleteTrade, targetDate }) {
+      const [filters, setFilters] = useState({ from: '', to: '' });
+      const [expanded, setExpanded] = useState({});
+      const [viewingTrade, setViewingTrade] = useState(null);
+
+      useEffect(() => {
+        if (targetDate && targetDate.date) {
+          setFilters({ from: targetDate.date, to: targetDate.date });
+          const matchingSession = sessions.find(s => s.date === targetDate.date || s.date.slice(0, 10) === targetDate.date);
+          if (matchingSession) {
+            setExpanded(prev => ({ ...prev, [matchingSession.id]: true }));
+          }
+        }
+      }, [targetDate, sessions]);
+
+      const toggleExpand = id => setExpanded(p => ({ ...p, [id]: !p[id] }));
+
+      const filtered = useMemo(() => {
+        return sessions.filter(s => {
+          if (filters.from && s.date < filters.from) return false;
+          if (filters.to && s.date > filters.to) return false;
+          return true;
+        }).sort((a, b) => b.date.localeCompare(a.date));
+      }, [sessions, filters]);
+
+      return e('div', { className: 'max-w-5xl mx-auto px-4 py-6' },
+        e('div', { className: 'bg-gray-800 rounded-lg border border-gray-700 p-4 mb-4 flex items-center justify-between gap-4' },
+          e('div', { className: 'flex items-center gap-4' },
+            e('div', null, e('div', { className: 'text-[10px] text-gray-500 uppercase font-semibold mb-1' }, 'From'),
+              e('input', { type: 'date', value: filters.from, onChange: ev => setFilters(p => ({ ...p, from: ev.target.value })), className: 'bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-xs text-gray-100' })
+            ),
+            e('div', null, e('div', { className: 'text-[10px] text-gray-500 uppercase font-semibold mb-1' }, 'To'),
+              e('input', { type: 'date', value: filters.to, onChange: ev => setFilters(p => ({ ...p, to: ev.target.value })), className: 'bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-xs text-gray-100' })
+            )
+          ),
+          e('button', { onClick: () => setFilters({ from: '', to: '' }), className: 'text-xs font-semibold text-blue-400 hover:text-blue-300 px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 transition rounded-lg' }, 'Reset Filters')
+        ),
+
+        e('div', { className: 'bg-[#0a0b10] rounded-xl border border-white/[0.04] overflow-hidden shadow-2xl card-glow' },
+          e('div', { className: 'overflow-x-auto' },
+            e('table', { className: 'w-full text-sm' },
+              e('thead', { className: 'bg-white/[0.02] border-b border-white/[0.04] text-gray-400' },
+                e('tr', null,
+                  e('th', { className: 'px-5 py-4 text-left text-[11px] font-bold uppercase tracking-wider' }, 'Date'),
+                  e('th', { className: 'px-5 py-4 text-left text-[11px] font-bold uppercase tracking-wider' }, 'Net P&L'),
+                  e('th', { className: 'px-5 py-4 text-left text-[11px] font-bold uppercase tracking-wider' }, 'Trades'),
+                  e('th', { className: 'px-5 py-4 text-left text-[11px] font-bold uppercase tracking-wider' }, 'Win Rate'),
+                  e('th', { className: 'px-5 py-4 text-left text-[11px] font-bold uppercase tracking-wider' }, 'Routine Score'),
+                  e('th', { className: 'px-5 py-4 text-left text-[11px] font-bold uppercase tracking-wider' }, 'Actions')
+                )
+              ),
+              e('tbody', null,
+                filtered.length === 0 ? e('tr', null, e('td', { colSpan: 6, className: 'px-5 py-12 text-center text-gray-500 font-medium' }, 'No sessions match your filters.')) :
+                  filtered.map(s => {
+                    const pnl = s.trades.reduce((sum, t) => sum + calcMetrics(t).pnl, 0);
+                    const wins = s.trades.filter(t => t.outcome === 'Win' || t.outcome === 'Target hit').length;
+                    const winRate = s.trades.length ? Math.round((wins / s.trades.length) * 100) : 0;
+                    const rScore = calcRoutineScore(s.routine);
+                    const isExp = expanded[s.id];
+
+                    return e(React.Fragment, { key: s.id },
+                      e('tr', { onClick: () => toggleExpand(s.id), className: `border-b border-white/[0.02] hover:bg-white/[0.01] transition cursor-pointer select-none` },
+                        e('td', { className: 'px-5 py-4 font-bold text-gray-200 flex items-center gap-2' },
+                          e('span', { className: 'text-gray-500 text-[10px] w-4 text-center' }, isExp ? '▼' : '▶'),
+                          s.date
+                        ),
+                        e('td', { className: `px-5 py-4 font-mono font-bold tracking-tight text-base ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}` }, fmt$(pnl)),
+                        e('td', { className: 'px-5 py-4 text-gray-300 font-bold' }, s.trades.length),
+                        e('td', { className: 'px-5 py-4' }, e('span', { className: `font-bold ${winRate >= 50 ? 'text-emerald-400' : s.trades.length === 0 ? 'text-gray-500' : 'text-rose-400'}` }, `${winRate}%`)),
+                        e('td', { className: 'px-5 py-4' }, e('span', { className: `font-bold ${rScore >= 80 ? 'text-emerald-400' : rScore >= 50 ? 'text-amber-400' : 'text-rose-400'}` }, `${rScore}%`)),
+                        e('td', { className: 'px-5 py-4 whitespace-nowrap' },
+                          e('button', { onClick: (e) => { e.stopPropagation(); onEditSession(s.id); }, className: 'text-blue-400 hover:text-blue-300 text-xs font-bold px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 rounded-md mr-2 transition' }, 'Edit Routine'),
+                          e('button', { onClick: (e) => { e.stopPropagation(); onDeleteSession(s.id); }, className: 'text-rose-400 hover:text-rose-300 text-xs font-bold px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 rounded-md transition' }, 'Del Session')
+                        )
+                      ),
+                      isExp && s.trades.length > 0 && e('tr', { className: 'bg-[#050507]/80' },
+                        e('td', { colSpan: 6, className: 'p-0' },
+                          e('div', { className: 'px-8 py-4 bg-black/40 shadow-inner border-b border-white/[0.02]' },
+                            e('table', { className: 'w-full text-xs' },
+                              e('thead', null, e('tr', { className: 'text-gray-500 uppercase tracking-wider font-semibold border-b border-white/[0.04]' },
+                                e('th', { className: 'pb-2 text-left px-4' }, 'Session'),
+                                e('th', { className: 'pb-2 text-left px-4' }, 'Inst'),
+                                e('th', { className: 'pb-2 text-left px-4' }, 'Dir'),
+                                e('th', { className: 'pb-2 text-left px-4' }, 'Outcome'),
+                                e('th', { className: 'pb-2 text-left px-4' }, 'R:R'),
+                                e('th', { className: 'pb-2 text-left px-4' }, 'P&L'),
+                                e('th', { className: 'pb-2 text-left px-4' }, 'Actions')
+                              )),
+                              e('tbody', null,
+                                s.trades.map((t, idx) => {
+                                  const m = calcMetrics(t);
+                                  return e('tr', { key: idx, className: 'border-b border-white/[0.02] hover:bg-white/[0.04] transition cursor-pointer', onClick: () => setViewingTrade({ trade: t, routine: s.routine }) },
+                                    e('td', { className: 'py-3 px-4 text-gray-400 text-[10px] font-bold uppercase tracking-wider' }, t.session),
+                                    e('td', { className: 'py-3 px-4 font-bold text-gray-300' }, t.instrument),
+                                    e('td', { className: 'py-3 px-4' }, e('span', { className: t.direction === 'Long' ? 'text-emerald-400' : 'text-rose-400' }, t.direction)),
+                                    e('td', { className: 'py-3 px-4' }, e('span', { className: `px-2 py-0.5 rounded-sm text-[9px] uppercase font-bold tracking-wider border ${t.outcome === 'Win' || t.outcome === 'Target hit' ? 'bg-emerald-900/30 text-emerald-400 border-emerald-500/30' : t.outcome === 'Loss' ? 'bg-rose-900/30 text-rose-400 border-rose-500/30' : 'bg-amber-900/30 text-amber-400 border-amber-500/30'}` }, t.outcome)),
+                                    e('td', { className: 'py-3 px-4 font-mono text-gray-400' }, `${m.rr}:1`),
+                                    e('td', { className: `py-3 px-4 font-mono font-bold ${m.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}` }, fmt$(m.pnl)),
+                                    e('td', { className: 'py-3 px-4 whitespace-nowrap' },
+                                      e('button', { onClick: (ev) => { ev.stopPropagation(); onEditTrade(s.id, idx); }, className: 'text-blue-400 hover:text-blue-300 text-[11px] font-bold mr-3' }, 'Edit'),
+                                      e('button', { onClick: (ev) => { ev.stopPropagation(); onDeleteTrade(s.id, idx); }, className: 'text-rose-400 hover:text-rose-300 text-[11px] font-bold' }, 'Del')
+                                    )
+                                  );
+                                })
+                              )
+                            )
+                          )
+                        )
+                      )
+                    );
+                  })
+              )
+            )
+          )
+        ),
+        e('div', { className: 'mt-3 px-2 text-[11px] font-bold text-gray-600 uppercase tracking-wider' }, `Showing ${filtered.length} of ${sessions.length} sessions`),
+        viewingTrade && e(TradeDetailsModal, { trade: viewingTrade.trade || viewingTrade, routine: viewingTrade.routine, onClose: () => setViewingTrade(null) })
+      );
+    }
+
+    // ==================== APP ====================
+    function Footer() {
+      return e('footer', { className: 'border-t border-white/[0.04] bg-[#050507] py-6 mt-12' },
+        e('div', { className: 'max-w-7xl mx-auto px-4 text-center' },
+          e('p', { className: 'text-[11px] text-gray-600 leading-relaxed max-w-2xl mx-auto' }, 'Futures trading involves substantial risk of loss and is not suitable for all investors. Past performance is not indicative of future results. This journal is for educational and self-analysis purposes only. Always conduct your own due diligence and consult a licensed financial advisor before making trading decisions.')
+        )
+      );
+    }
+
+    function App() {
+      const [sessions, setSessions] = useState(() => {
+        try {
+          const r = localStorage.getItem('tradingSessions_v1');
+          if (r) return JSON.parse(r);
+          // Migration from v1 trades/routines
+          const oldTrades = JSON.parse(localStorage.getItem('tradingJournal_v1') || '[]');
+          const oldRoutines = JSON.parse(localStorage.getItem('tradingJournalRoutines_v1') || '[]');
+          if (oldTrades.length === 0 && oldRoutines.length === 0) return [];
+
+          const map = {};
+          oldTrades.forEach(t => {
+            const d = t.date.slice(0, 10);
+            if (!map[d]) map[d] = { id: d, date: d, routine: emptyRoutine(), trades: [] };
+            map[d].trades.push(t);
+          });
+          oldRoutines.forEach(r => {
+            if (!map[r.date]) map[r.date] = { id: r.date, date: r.date, routine: emptyRoutine(), trades: [] };
+            map[r.date].routine = r;
+          });
+          return Object.values(map).sort((a, b) => b.date.localeCompare(a.date));
+        } catch (e) { return []; }
+      });
+
+      const [view, setView] = useState('dashboard');
+      const [editId, setEditId] = useState(null);
+      const [editTradeIdx, setEditTradeIdx] = useState(null);
+      const [journalTargetDate, setJournalTargetDate] = useState(null);
+
+      const handleDateClick = (dateStr) => {
+        setJournalTargetDate({ date: dateStr, ts: Date.now() });
+        setView('journal');
+      };
+
+      useEffect(() => { localStorage.setItem('tradingSessions_v1', JSON.stringify(sessions)); }, [sessions]);
+
+      const allTrades = useMemo(() => sessions.flatMap(s => s.trades), [sessions]);
+
+      const handleSaveSession = session => {
+        const conflict = sessions.find(s => s.date === session.date && s.id !== session.id);
+        if (conflict) {
+          alert('A session for this date already exists! Please go to the Journal tab, click "Edit Routine" or "Edit" on that specific date to add/modify trades.');
+          return;
+        }
+        if (!session.id) session.id = Date.now().toString(36);
+        setSessions(prev => {
+          const filtered = prev.filter(s => s.id !== session.id);
+          return [session, ...filtered].sort((a, b) => b.date.localeCompare(a.date));
+        });
+        setEditId(null);
+        setEditTradeIdx(null);
+        setView('journal');
+      };
+
+      const handleEdit = (id, tIdx = null) => { setEditId(id); setEditTradeIdx(tIdx); setView('log'); };
+      const handleDelete = id => { if (window.confirm('Delete this entire session and all its trades?')) setSessions(prev => prev.filter(s => s.id !== id)); };
+
+      const handleDeleteTrade = (sessionId, tIdx) => {
+        if (window.confirm('Delete this trade?')) {
+          setSessions(prev => prev.map(s => {
+            if (s.id === sessionId) {
+              const next = { ...s, trades: [...s.trades] };
+              next.trades.splice(tIdx, 1);
+              return next;
+            }
+            return s;
+          }));
+        }
+      };
+
+      const handleNew = () => { setEditId(null); setEditTradeIdx(null); setView('log'); };
+
+      const navBtn = (label, key, extra = '') => e('button', { onClick: () => setView(key), className: `px-4 py-2 rounded-lg text-[11px] uppercase tracking-wider font-bold transition border border-transparent ${view === key ? 'bg-blue-600/90 text-white shadow-lg shadow-blue-900/20' : 'text-gray-400 hover:text-white hover:bg-white/[0.04] hover:border-white/[0.06]'} ${extra}` }, label);
+
+      return e('div', { className: 'min-h-screen bg-[#050507] text-gray-100 flex flex-col' },
+        e('nav', { className: 'glass border-b border-white/[0.04] sticky top-0 z-50' },
+          e('div', { className: 'max-w-7xl mx-auto px-4 py-4 flex items-center justify-between' },
+            e('div', { className: 'flex items-center gap-3' },
+              e('h1', { className: 'text-lg font-extrabold tracking-tight text-white' }, 'Trading Journal'),
+              e('span', { className: 'text-[10px] text-emerald-400 font-bold uppercase tracking-widest hidden sm:inline border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 rounded-md' }, 'MNQ / MES')
+            ),
+            e('div', { className: 'flex items-center gap-2' },
+              navBtn('Dashboard', 'dashboard'),
+              navBtn('Journal', 'journal'),
+              e('button', { onClick: handleNew, className: 'px-4 py-2 rounded-lg text-[11px] uppercase tracking-wider font-extrabold bg-emerald-500 text-black hover:bg-emerald-400 transition shadow-lg shadow-emerald-900/20 ml-2' }, 'Log Session')
+            )
+          )
+        ),
+        e('main', { className: 'flex-1' },
+          view === 'dashboard' && e(Dashboard, { trades: allTrades, onDateClick: handleDateClick }),
+          view === 'log' && e(DailySessionForm, { session: editId ? sessions.find(s => s.id === editId) : null, initialTradeIdx: editTradeIdx, onSave: handleSaveSession, onCancel: () => setView('journal') }),
+          view === 'journal' && e(Journal, { sessions, onEditSession: handleEdit, onDeleteSession: handleDelete, onEditTrade: handleEdit, onDeleteTrade: handleDeleteTrade, targetDate: journalTargetDate })
+        ),
+        e(Footer)
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(e(App));
+  </script>
+</body>
+
+</html>
